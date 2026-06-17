@@ -39,7 +39,7 @@ except ImportError:
 # ──────────────────────────────────────────────────────────────
 
 GROQ_MODEL = "llama-3.1-8b-instant"
-BATCH_SIZE = 2          # rows per LLM call — small batches = more reliable JSON
+BATCH_SIZE = 1          # rows per LLM call — small batches = more reliable JSON
 MAX_RETRIES = 3
 RETRY_DELAY_SEC = 2
 
@@ -229,7 +229,7 @@ def call_llm_batch(client, sheet_name, batch_rows, rto_reference,
                     {"role": "user", "content": user_msg},
                 ],
                 temperature=0,
-                max_tokens=500,
+                max_tokens=300,
             )
             raw = resp.choices[0].message.content
             cleaned = _strip_json_fences(raw)
