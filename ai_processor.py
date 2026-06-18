@@ -492,10 +492,36 @@ def chunk(lst, n):
         yield lst[i:i + n]
 
 
+_RULE_NAME_NUM_RE = re.compile(r"^(.*_)(\d+)(_TW)$")
+
+
+def _renumber_rule_name(row_dict, counter):
+    """Overwrite whatever numeric suffix the LLM produced with a sequential,
+    state-wide counter (shared across every sheet/batch for this state).
+
+    The LLM has no memory between batch calls — each call starts a fresh
+    context, so "keep incrementing across batches" in the prompt text is
+    not something it can actually do reliably. That's why batches were
+    restarting at _1_TW each time. Counting in Python instead makes
+    uniqueness/contiguity a guarantee rather than a hope.
+    """
+    name = row_dict.get("rule_name") or ""
+    counter[0] += 1
+    m = _RULE_NAME_NUM_RE.match(name)
+    if m:
+        row_dict["rule_name"] = f"{m.group(1)}{counter[0]}{m.group(3)}"
+    else:
+        # Unexpected pattern from the LLM — still keep numbering in sync
+        # rather than silently producing another collision.
+        row_dict["rule_name"] = f"{name or 'RULE'}_{counter[0]}_TW"
+    return row_dict
+
+
 def generate_for_state_ai(client, raw, rto_lookup, rto_to_state,
                            state_name, eff_start, eff_end,
                            progress_callback=None):
     all_rows = []
+    rule_counter = [0]  # mutable int shared across all sheets/batches below
 
     sheet_configs = [
         ("TW 1+5", "tw_1p5", "1p5",
@@ -535,7 +561,14 @@ def generate_for_state_ai(client, raw, rto_lookup, rto_to_state,
         for batch in chunk(relevant_rows, batch_size):
             if progress_callback:
                 progress_callback(f"{state_name}: {sheet_name} batch...", 0, 0)
-            rto_ref = {}
+            # Only send RTO data for the cluster(s) actually present in THIS
+            # batch, not the whole state's cluster table. A batch is usually
+            # 1-2 rows, so this stays tiny regardless of how many RTOs the
+            # state has overall (the prior `rto_ref = {}` was a blunt fix for
+            # the 413/TPM error — it killed RTO accuracy as a side effect
+            # instead of just shrinking the payload).
+            batch_cluster_keys = {row_cluster_key(r) for r in batch if row_cluster_key(r)}
+            rto_ref = {ck: clusters[ck] for ck in batch_cluster_keys if ck in clusters}
             try:
                 results = call_llm_batch(
                     client, sheet_name, batch, rto_ref,
@@ -546,6 +579,7 @@ def generate_for_state_ai(client, raw, rto_lookup, rto_to_state,
                     progress_callback(f"ERROR: {e}", 0, 0)
                 continue
             for r in results:
+                _renumber_rule_name(r, rule_counter)
                 all_rows.append(row_dict_to_list(r))
 
     return all_rows
