@@ -1,17 +1,29 @@
 """
 Digit 2W Converter — AI Edition — Flask API
 Endpoints:
-  POST /api/process        - Upload Excel + params → AI-generates output files + validation report
-  GET  /api/states          - List available states from an uploaded file
+  POST /api/process              - Upload Excel + params → kicks off a background job, returns session_id immediately
+  GET  /api/status/<session_id>  - Poll job status/progress; once done, includes the same payload /api/process used to return
+  GET  /api/states                - List available states from an uploaded file
   GET  /api/download/<session_id>/<filename> - Download a generated file
-  GET  /api/files/<session_id> - List all generated files in a session
+  GET  /api/files/<session_id>   - List all generated files in a session
   GET  /api/validate/<session_id>/<filename>  - Re-run validator on a generated file, get report
+
+IMPORTANT — deployment note:
+Processing now runs in a background thread instead of inside the request
+handler, because a full run can mean hundreds of sequential Groq calls and
+easily takes 10-60+ minutes. Job state lives in an in-memory dict, so this
+only works correctly with a SINGLE worker PROCESS (threads are fine, extra
+gunicorn *workers* are not — they don't share memory). On Render, set the
+start command to something like:
+    gunicorn app_ai:app --bind 0.0.0.0:$PORT --workers 1 --worker-class gthread --threads 4 --timeout 120
 """
 
 import os
 import json
 import zipfile
 import uuid
+import threading
+import traceback
 from datetime import datetime
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
@@ -28,6 +40,11 @@ UPLOAD_DIR = "/tmp/digit_ai_uploads"
 OUTPUT_DIR = "/tmp/digit_ai_outputs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# session_id -> {"status": "queued"|"running"|"done"|"error",
+#                "progress": [...], "result": {...}|None, "error": str|None}
+JOBS = {}
+JOBS_LOCK = threading.Lock()
 
 
 @app.route("/api/health", methods=["GET"])
@@ -75,6 +92,11 @@ def process():
       effect_start  - e.g. "2026-02-01"
       effect_end    - e.g. "2026-02-28"
       states        - JSON array of state names (optional; omit for all)
+
+    Returns immediately with a session_id + status_url. The actual AI
+    processing happens in a background thread — poll status_url for
+    progress and the final result (this can take many minutes for a
+    full multi-state run, so don't block on this request).
     """
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
@@ -100,10 +122,33 @@ def process():
     out_dir = os.path.join(OUTPUT_DIR, session_id)
     os.makedirs(out_dir, exist_ok=True)
 
-    progress_log = []
+    with JOBS_LOCK:
+        JOBS[session_id] = {"status": "queued", "progress": [], "result": None, "error": None}
+
+    thread = threading.Thread(
+        target=_run_job,
+        args=(session_id, save_path, out_dir, effect_start, effect_end, states),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({
+        "session_id": session_id,
+        "status": "queued",
+        "status_url": f"/api/status/{session_id}",
+    }), 202
+
+
+def _run_job(session_id, save_path, out_dir, effect_start, effect_end, states):
+    """Runs the actual AI pipeline off the request thread. Updates JOBS[session_id]
+    as it goes so /api/status can report live progress."""
 
     def progress_cb(msg, current, total):
-        progress_log.append({"message": msg, "current": current, "total": total})
+        with JOBS_LOCK:
+            JOBS[session_id]["progress"].append({"message": msg, "current": current, "total": total})
+
+    with JOBS_LOCK:
+        JOBS[session_id]["status"] = "running"
 
     try:
         generated = process_all_ai(
@@ -141,21 +186,46 @@ def process():
 
         total_violations = sum(v["violation_count"] for v in validation_summary.values())
 
-        return jsonify({
+        result = {
             "session_id": session_id,
             "files_generated": len(generated),
             "files": file_info,
             "zip": zip_info,
-            "progress": progress_log,
             "validation": {
                 "total_violations": total_violations,
                 "per_file": validation_summary,
             },
-        })
+        }
+        with JOBS_LOCK:
+            JOBS[session_id]["status"] = "done"
+            JOBS[session_id]["result"] = result
 
     except Exception as e:
-        import traceback
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+        with JOBS_LOCK:
+            JOBS[session_id]["status"] = "error"
+            JOBS[session_id]["error"] = str(e)
+            JOBS[session_id]["trace"] = traceback.format_exc()
+
+
+@app.route("/api/status/<session_id>", methods=["GET"])
+def job_status(session_id):
+    """Poll this while a job runs. Recommended: every 3-5s — frequent
+    polling also keeps a Render free-tier instance from spinning down
+    mid-job, since spin-down is based on inbound request inactivity."""
+    with JOBS_LOCK:
+        job = JOBS.get(session_id)
+        if job is None:
+            return jsonify({"error": "Unknown session_id"}), 404
+        recent_progress = job["progress"][-20:]
+        return jsonify({
+            "session_id": session_id,
+            "status": job["status"],
+            "latest_progress": recent_progress[-1] if recent_progress else None,
+            "recent_progress": recent_progress,
+            "progress_count": len(job["progress"]),
+            "result": job["result"] if job["status"] == "done" else None,
+            "error": job["error"] if job["status"] == "error" else None,
+        })
 
 
 @app.route("/api/validate/<session_id>/<filename>", methods=["GET"])
@@ -199,4 +269,7 @@ if __name__ == "__main__":
     print("Starting Digit 2W AI Converter API on port 5060...")
     if not os.environ.get("GROQ_API_KEY"):
         print("WARNING: GROQ_API_KEY not set. Set it before calling /api/process.")
-    app.run(debug=True, host="0.0.0.0", port=5060)
+    # Local dev only. In production (Render), run via gunicorn with a single
+    # worker process + threads, e.g.:
+    #   gunicorn app_ai:app --bind 0.0.0.0:$PORT --workers 1 --worker-class gthread --threads 4 --timeout 120
+    app.run(debug=True, host="0.0.0.0", port=5060, threaded=True)
