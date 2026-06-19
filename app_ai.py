@@ -25,7 +25,7 @@ import uuid
 import threading
 import traceback
 from datetime import datetime
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_cors import CORS
 
 from ai_processor import (
@@ -33,7 +33,12 @@ from ai_processor import (
 )
 from validate_output import validate_file
 
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    static_folder="frontend/dist",
+    static_url_path=""
+)
+
 CORS(app)
 
 UPLOAD_DIR = "/tmp/digit_ai_uploads"
@@ -47,24 +52,18 @@ JOBS = {}
 JOBS_LOCK = threading.Lock()
 
 
-@app.route("/", methods=["GET"])
-def index():
-    return jsonify({
-        "service": "Digit 2W Converter — AI Edition API",
-        "status": "running",
-        "note": "This is an API-only service, no HTML frontend is served here. "
-                 "Point your separately-deployed React frontend's API base URL "
-                 "at this host.",
-        "endpoints": [
-            "POST /api/states",
-            "POST /api/process",
-            "GET /api/status/<session_id>",
-            "GET /api/files/<session_id>",
-            "GET /api/download/<session_id>/<filename>",
-            "GET /api/validate/<session_id>/<filename>",
-            "GET /api/health",
-        ],
-    })
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_react(path):
+    if path.startswith("api/"):
+        return jsonify({"error": "Not Found"}), 404
+
+    file_path = os.path.join(app.static_folder, path)
+
+    if path and os.path.exists(file_path):
+        return send_from_directory(app.static_folder, path)
+
+    return send_from_directory(app.static_folder, "index.html")
 
 
 @app.route("/api/health", methods=["GET"])
