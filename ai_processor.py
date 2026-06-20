@@ -177,19 +177,21 @@ BATCH_SIZE_BY_SHEET = {
 
 DEFAULT_BATCH_SIZE = 4
 
-# Raised from 500 -> 650: the observed truncation failures (Bihar TW 1+5,
-# TW 1+1 & SATP, SAOD) were all "Unterminated string" / "Expecting property
-# name" JSON errors, the signature of the response getting cut off mid-row
-# by max_tokens rather than the model writing genuinely malformed JSON. 500
-# tokens/row was too tight once the long "EXCLUDE: BRAND1, BRAND2, ..." make
-# strings and multi-fuel strings (rule 12) are included in a row.
-TOKENS_PER_OUTPUT_ROW = 650
+# Tuned to balance two failure modes that fight each other: too LOW and
+# responses get truncated mid-row (json parse errors); too HIGH and a
+# single call's own estimate can exceed the account's TPM cap on its own,
+# which Groq rejects outright with a 413 before pacing even matters. 580
+# (up from the original 500, but down from a since-reverted 650) gives
+# headroom for longer EXCLUDE/multi-fuel strings without pushing typical
+# batches close to the TPM ceiling.
+TOKENS_PER_OUTPUT_ROW = 580
 MIN_MAX_TOKENS = 600
-# Raised default ceiling 3500 -> 4096: llama-3.1-8b-instant on Groq supports
-# up to 8192 output tokens; 3500 was clipping the larger SAOD batches (4
-# output rows per input row) before they finished. Still override-able via
-# env var if a given account's TPM cap needs it lower.
-MAX_TOKENS_CEILING = int(os.environ.get("GROQ_MAX_TOKENS_CEILING", "4096"))
+# 3500 (not the since-reverted 4096): the real constraint here isn't what
+# the model supports (8192) but what a single call can request without
+# tripping the account's TPM cap — see the tpm_safety_cap clamp in
+# call_llm_batch, which is the actual fix for both truncation AND 413s.
+# This ceiling is now just a secondary cap, not the primary one.
+MAX_TOKENS_CEILING = int(os.environ.get("GROQ_MAX_TOKENS_CEILING", "3500"))
 
 MAX_RETRIES = 4
 RETRY_DELAY_SEC = 2
@@ -439,10 +441,36 @@ def call_llm_batch(client, sheet_name, batch_rows, rto_reference,
     )
 
     # Rough total-token estimate for THIS call (system prompt + user payload +
-    # expected completion), used to pace against the TPM budget before we
-    # actually send the request. Doesn't need to be exact — it just needs to
-    # stop us from firing calls that we already know will blow the budget.
+    # expected completion). This used to only feed the client-side pacing
+    # limiter, which paces BETWEEN calls but never shrinks a single call —
+    # so a call whose own prompt+completion estimate exceeded the account's
+    # TPM cap got waved through by the limiter and then hard-rejected by
+    # Groq's server with a 413 ("Request too large... Limit 6000, Requested
+    # 6247"), no retry possible since the call body itself is the problem.
+    # Fix: shrink max_tokens here, BEFORE the call, so the request itself
+    # can never exceed the cap on its own — same idea as the clamp already
+    # in _RateLimiter.wait(), just applied to what we actually send instead
+    # of just what we tell the pacer to expect.
     est_prompt_tokens = (len(RULES_PROMPT) + len(user_msg)) // 4  # ~4 chars/token
+    tpm_safety_cap = int(GROQ_TPM_LIMIT * 0.9)  # headroom under the account's real cap
+    available_for_completion = tpm_safety_cap - est_prompt_tokens
+    if available_for_completion < MIN_MAX_TOKENS:
+        # The prompt itself (system rules + this batch's RTO reference +
+        # rows) is already eating most of the TPM budget — almost always
+        # because this batch's cluster has an unusually large RTO list.
+        # Forcing max_tokens up to MIN_MAX_TOKENS here would recreate the
+        # exact 413 this fix exists to prevent, so instead we let
+        # max_tokens go as low as the budget allows (down to a hard floor
+        # of 150, enough for a single small row) rather than guarantee an
+        # oversized request. A batch this constrained will likely still
+        # need the JSON-truncation salvage path, but it'll get a real
+        # response instead of an instant server-side rejection.
+        max_tokens = max(150, available_for_completion)
+        print(f"WARNING: prompt for {sheet_name}/{state_filter} batch is large "
+              f"(~{est_prompt_tokens} tokens) — completion budget squeezed to "
+              f"{max_tokens} tokens to stay under TPM cap")
+    else:
+        max_tokens = max(MIN_MAX_TOKENS, min(max_tokens, available_for_completion))
     est_call_tokens = est_prompt_tokens + max_tokens
 
     last_err = None
