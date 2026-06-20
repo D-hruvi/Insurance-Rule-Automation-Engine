@@ -143,11 +143,14 @@ function ProgressBar({ log }) {
   const last = log[log.length - 1];
   const pct = last.total > 0 ? Math.round((last.current / last.total) * 100) : 0;
   const done = last.message === "Complete!";
+  const doneWithErrors = typeof last.message === "string" && last.message.startsWith("Done with errors");
+  const finished = done || doneWithErrors;
+  const barColor = done ? "#10B981" : doneWithErrors ? "#F59E0B" : "#F59E0B";
 
   return (
     <div style={{ marginTop: 20 }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-        <span style={{ color: done ? "#10B981" : "#F59E0B", fontSize: 13, fontWeight: 600 }}>
+        <span style={{ color: done ? "#10B981" : doneWithErrors ? "#FCA5A5" : "#F59E0B", fontSize: 13, fontWeight: 600 }}>
           {last.message}
         </span>
         <span style={{ color: "#64748B", fontSize: 13 }}>{pct}%</span>
@@ -155,10 +158,10 @@ function ProgressBar({ log }) {
       <div style={{ background: "#1E293B", borderRadius: 6, height: 8, overflow: "hidden" }}>
         <div style={{
           height: "100%", width: `${pct}%`,
-          background: done ? "#10B981" : "linear-gradient(90deg, #F59E0B, #FBBF24)",
+          background: done ? "#10B981" : doneWithErrors ? "#EF4444" : "linear-gradient(90deg, #F59E0B, #FBBF24)",
           borderRadius: 6,
           transition: "width 0.4s ease",
-          boxShadow: done ? "none" : "0 0 8px #F59E0B88",
+          boxShadow: finished ? "none" : "0 0 8px #F59E0B88",
         }} />
       </div>
       <div style={{ marginTop: 8, maxHeight: 100, overflowY: "auto" }}>
@@ -306,24 +309,65 @@ export default function App() {
     if (selectedStates.length > 0)
       fd.append("states", JSON.stringify(selectedStates));
 
-    // Simulate progress ticks while waiting (real progress comes in response)
-    let tick = 0;
-    const ticker = setInterval(() => {
-      tick++;
-      setProgress(p => [...p, { message: `Processing… (${tick}s)`, current: tick, total: 0 }]);
-    }, 1200);
-
     try {
+      // Kick off the job. /api/process returns 202 immediately with just a
+      // session_id — the actual AI processing (hundreds of Groq calls) runs
+      // in a background thread on the server. This response is NOT the
+      // finished result, just confirmation the job was queued.
       const res = await fetch(`${API}/api/process`, { method: "POST", body: fd });
-      clearInterval(ticker);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Server error");
-      setProgress(data.progress || []);
-      setSessionId(data.session_id);
-      setResult(data);
-      setStatus("success");
+
+      const sid = data.session_id;
+      setSessionId(sid);
+
+      // Poll /api/status/<session_id> until status is "done" or "error".
+      // This is the actual fix: previously the queued response was treated
+      // as the final result, so the UI jumped to "Complete! 100%" the
+      // instant the job was accepted, regardless of whether any work had
+      // happened yet.
+      const POLL_INTERVAL_MS = 4000;
+      const finalResult = await new Promise((resolve, reject) => {
+        const poll = async () => {
+          try {
+            const sres = await fetch(`${API}/api/status/${sid}`);
+            const sdata = await sres.json();
+            if (!sres.ok) throw new Error(sdata.error || "Status check failed");
+
+            if (sdata.recent_progress) setProgress(sdata.recent_progress);
+
+            if (sdata.status === "done") {
+              resolve(sdata.result);
+            } else if (sdata.status === "error") {
+              reject(new Error(sdata.error || "Processing failed on the server"));
+            } else {
+              // "queued" or "running" — keep polling
+              setTimeout(poll, POLL_INTERVAL_MS);
+            }
+          } catch (e) {
+            reject(e);
+          }
+        };
+        poll();
+      });
+
+      setResult(finalResult);
+      // A job can finish ("done") while some batches still failed along the
+      // way (see result.complete / result.failures from the backend) — that
+      // is a real, different state from a clean success, so don't just
+      // collapse everything into "success".
+      if (finalResult && finalResult.complete === false) {
+        setStatus("partial");
+        const failedCount = finalResult.failures?.total_failed_batches ?? 0;
+        const failedStates = finalResult.failures?.states_with_failures ?? 0;
+        setError(
+          `Finished with errors: ${failedCount} batch(es) across ${failedStates} ` +
+          `state(s) failed and were skipped. Output below is incomplete for those states.`
+        );
+      } else {
+        setStatus("success");
+      }
     } catch (e) {
-      clearInterval(ticker);
       setError(e.message);
       setStatus("error");
     }
@@ -454,7 +498,18 @@ export default function App() {
           )}
 
           {processing && <ProgressBar log={progress} />}
-          {status === "success" && <ProgressBar log={[{ message: "Complete!", current: 1, total: 1 }]} />}
+          {(status === "success" || status === "partial") && (
+            <ProgressBar
+              log={[
+                status === "success"
+                  ? { message: "Complete!", current: 1, total: 1 }
+                  : {
+                      message: `Done with errors: ${result?.failures?.total_failed_batches ?? "some"} batch(es) failed`,
+                      current: 1, total: 1,
+                    },
+              ]}
+            />
+          )}
         </div>
 
         {/* RIGHT: State picker */}
@@ -475,6 +530,29 @@ export default function App() {
       {/* Results */}
       {result && (
         <div style={{ maxWidth: 920, margin: "0 auto", padding: "0 24px 48px" }}>
+          {result.failures && result.failures.total_failed_batches > 0 && (
+            <div style={{
+              background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.3)",
+              borderRadius: 10, padding: "16px 18px", marginBottom: 20,
+            }}>
+              <div style={{ color: "#FCA5A5", fontWeight: 700, fontSize: 14, marginBottom: 8 }}>
+                ⚠ {result.failures.total_failed_batches} batch(es) failed across{" "}
+                {result.failures.states_with_failures} state(s) — output below is incomplete
+              </div>
+              <div style={{ fontSize: 12, color: "#94A3B8", maxHeight: 160, overflowY: "auto" }}>
+                {Object.entries(result.failures.by_state || {}).map(([state, batches]) => (
+                  <div key={state} style={{ marginBottom: 6 }}>
+                    <span style={{ color: "#FCD34D", fontWeight: 600 }}>{state}</span>
+                    {batches.map((b, i) => (
+                      <div key={i} style={{ marginLeft: 12, color: "#64748B" }}>
+                        {b.sheet} ({b.rows} row{b.rows === 1 ? "" : "s"} skipped): {b.error}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <ResultTable
             files={result.files}
             zipFile={result.zip}

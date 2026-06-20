@@ -170,7 +170,7 @@ def _run_job(session_id, save_path, out_dir, effect_start, effect_end, states):
         JOBS[session_id]["status"] = "running"
 
     try:
-        generated = process_all_ai(
+        generated, failures = process_all_ai(
             save_path, out_dir, effect_start, effect_end,
             states=states, progress_callback=progress_cb,
         )
@@ -204,6 +204,7 @@ def _run_job(session_id, save_path, out_dir, effect_start, effect_end, states):
         }
 
         total_violations = sum(v["violation_count"] for v in validation_summary.values())
+        total_failed_batches = sum(len(v) for v in failures.values())
 
         result = {
             "session_id": session_id,
@@ -214,8 +215,18 @@ def _run_job(session_id, save_path, out_dir, effect_start, effect_end, states):
                 "total_violations": total_violations,
                 "per_file": validation_summary,
             },
+            "failures": {
+                "total_failed_batches": total_failed_batches,
+                "states_with_failures": len(failures),
+                "by_state": failures,
+            },
+            "complete": total_failed_batches == 0,
         }
         with JOBS_LOCK:
+            # Status is still "done" (the job finished running, didn't crash),
+            # but `result.complete` tells the frontend whether output is
+            # actually complete or partial — the old code reported success
+            # even when every batch for a state had failed.
             JOBS[session_id]["status"] = "done"
             JOBS[session_id]["result"] = result
 

@@ -45,28 +45,61 @@ except ImportError:
 
 
 class _RateLimiter:
-    """Paces outgoing Groq calls so we stay under the org's RPM cap.
+    """Paces outgoing Groq calls so we stay under the org's RPM **and** TPM caps.
 
-    This is deliberately simple (a single shared "next allowed call" time
-    behind a lock) rather than a full token-bucket — that's all we need for
-    a sequential pipeline like this one. A 429 can push the next allowed
-    call further out via penalize(), so one rate-limit hit slows the whole
-    pipeline down briefly instead of every subsequent call immediately
-    failing too.
+    The original version only paced by RPM (a fixed min-interval between
+    calls). That's not the binding constraint for this pipeline: each call
+    pays a large fixed cost (the ~1500+ token RULES_PROMPT system message)
+    regardless of batch size, so TPM (tokens/minute) runs out long before
+    RPM (requests/minute) does — that's exactly what the 429s in production
+    showed (Limit 6000 TPM, hit at ~2300 tokens/call after only 2-3 calls).
+
+    This tracks a rolling 60s window of tokens actually consumed (estimated
+    pre-call, corrected post-call from the real usage Groq returns) and
+    makes wait() block until BOTH the RPM interval and the TPM budget for
+    the upcoming call are satisfied. A 429 can still push things out further
+    via penalize().
     """
 
-    def __init__(self, rpm):
+    def __init__(self, rpm, tpm):
         self.min_interval = 60.0 / max(rpm, 1)
+        self.tpm = max(tpm, 1)
         self._lock = threading.Lock()
         self._next_allowed = 0.0
+        self._token_events = []  # list of (timestamp, tokens)
 
-    def wait(self):
+    def _prune(self, now):
+        cutoff = now - 60.0
+        self._token_events = [(t, n) for t, n in self._token_events if t > cutoff]
+
+    def wait(self, estimated_tokens=0):
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._prune(now)
+                used = sum(n for _, n in self._token_events)
+                rpm_delay = self._next_allowed - now
+                tpm_delay = 0.0
+                if used + estimated_tokens > self.tpm:
+                    if self._token_events:
+                        tpm_delay = max(0.0, (self._token_events[0][0] + 60.0) - now)
+                    else:
+                        tpm_delay = 0.0
+                delay = max(rpm_delay, tpm_delay)
+                if delay <= 0:
+                    self._next_allowed = max(now, self._next_allowed) + self.min_interval
+                    self._token_events.append((now, estimated_tokens))
+                    return
+            time.sleep(min(delay, 5.0) + 0.05)
+
+    def record_actual(self, estimated_tokens, actual_tokens):
+        """Correct the running token total once we know the real usage."""
         with self._lock:
-            now = time.monotonic()
-            delay = self._next_allowed - now
-            self._next_allowed = max(now, self._next_allowed) + self.min_interval
-        if delay > 0:
-            time.sleep(delay)
+            for i in range(len(self._token_events) - 1, -1, -1):
+                t, n = self._token_events[i]
+                if n == estimated_tokens:
+                    self._token_events[i] = (t, actual_tokens)
+                    return
 
     def penalize(self, extra_seconds):
         with self._lock:
@@ -107,10 +140,18 @@ SHEET_OUTPUT_MULTIPLIER = {
     "TW 1+1 & SATP": 2,
     "TW SAOD with Flexi Options": 4,
 }
+# Defaults raised from 1 row/call. At batch size 1, the fixed ~1500-token
+# RULES_PROMPT system message is paid on every single call, which is what
+# blew through the 6000 TPM cap after only 2-3 calls in production. Larger
+# batches amortize that fixed cost over more output rows per call, cutting
+# total call count (and therefore total tokens spent on system-prompt
+# overhead) substantially, while staying small enough that MAX_TOKENS_CEILING
+# still comfortably covers the expected output size for each sheet's
+# row-multiplier.
 BATCH_SIZE_BY_SHEET = {
-    "TW 1+5": int(os.environ.get("BATCH_SIZE_TW1P5", "1")),
-    "TW 1+1 & SATP": int(os.environ.get("BATCH_SIZE_TW1P1", "1")),
-    "TW SAOD with Flexi Options": int(os.environ.get("BATCH_SIZE_SAOD", "1")),
+    "TW 1+5": int(os.environ.get("BATCH_SIZE_TW1P5", "6")),
+    "TW 1+1 & SATP": int(os.environ.get("BATCH_SIZE_TW1P1", "4")),
+    "TW SAOD with Flexi Options": int(os.environ.get("BATCH_SIZE_SAOD", "2")),
 }
 
 DEFAULT_BATCH_SIZE = 4
@@ -122,13 +163,15 @@ MAX_TOKENS_CEILING = int(os.environ.get("GROQ_MAX_TOKENS_CEILING", "3500"))
 MAX_RETRIES = 4
 RETRY_DELAY_SEC = 2
 
-# Groq's free tier is rate-limited org-wide (commonly ~30 requests/minute for
-# this model, but check https://console.groq.com/dashboard/limits for your
-# account's actual numbers — they vary by tier and change over time).
-# We pace calls under that cap so we mostly never trigger a 429 in the first
-# place, rather than firing as fast as possible and retrying after the fact.
+# Groq's free tier is rate-limited org-wide on BOTH requests/minute and
+# tokens/minute (commonly ~30 RPM / 6000 TPM for this model on free tier,
+# but check https://console.groq.com/dashboard/limits for your account's
+# actual numbers — they vary by tier and change over time). TPM is the
+# binding constraint here, not RPM: each call pays the full RULES_PROMPT
+# system-message cost (~1500+ tokens) no matter how small the batch is.
 GROQ_RPM_LIMIT = float(os.environ.get("GROQ_RPM_LIMIT", "25"))
-_rate_limiter = _RateLimiter(GROQ_RPM_LIMIT)
+GROQ_TPM_LIMIT = float(os.environ.get("GROQ_TPM_LIMIT", "5500"))  # a bit under the 6000 cap for headroom
+_rate_limiter = _RateLimiter(GROQ_RPM_LIMIT, GROQ_TPM_LIMIT)
 
 OUTPUT_HEADERS = [
     "Rule Code", "Rule Name *", "IC Code *", "Product Type *", "Group",
@@ -314,9 +357,16 @@ def call_llm_batch(client, sheet_name, batch_rows, rto_reference,
         max(MIN_MAX_TOKENS, est_output_rows * TOKENS_PER_OUTPUT_ROW),
     )
 
+    # Rough total-token estimate for THIS call (system prompt + user payload +
+    # expected completion), used to pace against the TPM budget before we
+    # actually send the request. Doesn't need to be exact — it just needs to
+    # stop us from firing calls that we already know will blow the budget.
+    est_prompt_tokens = (len(RULES_PROMPT) + len(user_msg)) // 4  # ~4 chars/token
+    est_call_tokens = est_prompt_tokens + max_tokens
+
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
-        _rate_limiter.wait()
+        _rate_limiter.wait(estimated_tokens=est_call_tokens)
         try:
             resp = client.chat.completions.create(
                 model=GROQ_MODEL,
@@ -328,6 +378,11 @@ def call_llm_batch(client, sheet_name, batch_rows, rto_reference,
                 max_tokens=max_tokens,
             )
             raw = resp.choices[0].message.content
+
+            usage = getattr(resp, "usage", None)
+            actual_tokens = getattr(usage, "total_tokens", None) if usage else None
+            if actual_tokens:
+                _rate_limiter.record_actual(est_call_tokens, actual_tokens)
 
             cleaned = _strip_json_fences(raw)
             print("\n========== RAW LLM RESPONSE ==========")
@@ -521,6 +576,7 @@ def generate_for_state_ai(client, raw, rto_lookup, rto_to_state,
                            state_name, eff_start, eff_end,
                            progress_callback=None):
     all_rows = []
+    failed_batches = []  # list of {"sheet": ..., "rows": n, "error": str}
     rule_counter = [0]  # mutable int shared across all sheets/batches below
 
     sheet_configs = [
@@ -576,13 +632,18 @@ def generate_for_state_ai(client, raw, rto_lookup, rto_to_state,
                 )
             except RuntimeError as e:
                 if progress_callback:
-                    progress_callback(f"ERROR: {e}", 0, 0)
+                    progress_callback(f"ERROR (batch dropped): {e}", 0, 0)
+                failed_batches.append({
+                    "sheet": sheet_name,
+                    "rows": len(batch),
+                    "error": str(e),
+                })
                 continue
             for r in results:
                 _renumber_rule_name(r, rule_counter)
                 all_rows.append(row_dict_to_list(r))
 
-    return all_rows
+    return all_rows, failed_batches
 
 
 def process_all_ai(input_path, output_dir, eff_start, eff_end,
@@ -628,13 +689,16 @@ def process_all_ai(input_path, output_dir, eff_start, eff_end,
         )
 
     generated = []
+    all_failures = {}  # state -> list of failed batch dicts
     for idx, state in enumerate(targets):
         if progress_callback:
             progress_callback(f"Processing {state}...", idx, len(targets))
-        rows = generate_for_state_ai(
+        rows, failed = generate_for_state_ai(
             client, raw, rto_lookup, rto_to_state, state,
             eff_start, eff_end, progress_callback,
         )
+        if failed:
+            all_failures[state] = failed
         if not rows:
             continue
         fname = state.replace(", ", "_").replace(" ", "") + "_2W.xlsx"
@@ -642,9 +706,19 @@ def process_all_ai(input_path, output_dir, eff_start, eff_end,
         write_output_excel(rows, out_path)
         generated.append(out_path)
 
+    total_failed_batches = sum(len(v) for v in all_failures.values())
     if progress_callback:
-        progress_callback("Complete!", len(targets), len(targets))
-    return generated
+        if total_failed_batches:
+            progress_callback(
+                f"Done with errors: {total_failed_batches} batch(es) across "
+                f"{len(all_failures)} state(s) failed and were skipped — output is "
+                f"INCOMPLETE for those states. See failure details.",
+                len(targets), len(targets),
+            )
+        else:
+            progress_callback("Complete!", len(targets), len(targets))
+
+    return generated, all_failures
 
 
 if __name__ == "__main__":
@@ -657,7 +731,16 @@ if __name__ == "__main__":
     def cb(msg, cur, total):
         print(f"[{cur}/{total}] {msg}")
 
-    files = process_all_ai(input_path, output_dir, eff_s, eff_e, states, cb)
+    files, failures = process_all_ai(input_path, output_dir, eff_s, eff_e, states, cb)
     print(f"\nGenerated {len(files)} files:")
     for f in files:
         print(f"  {f}")
+    if failures:
+        total_failed = sum(len(v) for v in failures.values())
+        print(f"\n⚠ {total_failed} batch(es) FAILED and were skipped "
+              f"(output is incomplete for these states):")
+        for state, batches in failures.items():
+            print(f"  {state}: {len(batches)} failed batch(es)")
+            for b in batches:
+                print(f"    - {b['sheet']} ({b['rows']} rows): {b['error']}")
+        sys.exit(1)
