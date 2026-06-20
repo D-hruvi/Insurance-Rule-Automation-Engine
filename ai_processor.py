@@ -73,6 +73,20 @@ class _RateLimiter:
         self._token_events = [(t, n) for t, n in self._token_events if t > cutoff]
 
     def wait(self, estimated_tokens=0):
+        # Clamp: a single call's estimate can never be allowed to exceed the
+        # TPM budget on its own — if it could, the loop below would never
+        # find a state where "used + estimated_tokens <= tpm" becomes true,
+        # even with a completely empty window, and would spin forever. This
+        # was a real deadlock: a batch whose prompt+completion estimate came
+        # out above GROQ_TPM_LIMIT would hang call_llm_batch indefinitely,
+        # with no error, no retry, no log line — exactly the "stuck at 0%
+        # forever" symptom seen in production. Clamping means we may still
+        # get a real 429 for an oversized call, but we'll at least DO the
+        # call and let the normal retry/backoff path handle it, instead of
+        # hanging before ever reaching the network.
+        estimated_tokens = min(estimated_tokens, int(self.tpm * 0.95))
+
+        deadline = time.monotonic() + 90.0  # hard safety ceiling, belt-and-suspenders
         while True:
             with self._lock:
                 now = time.monotonic()
@@ -81,12 +95,19 @@ class _RateLimiter:
                 rpm_delay = self._next_allowed - now
                 tpm_delay = 0.0
                 if used + estimated_tokens > self.tpm:
-                    if self._token_events:
-                        tpm_delay = max(0.0, (self._token_events[0][0] + 60.0) - now)
-                    else:
-                        tpm_delay = 0.0
+                    # Don't just wait for the FULL window to empty — wait only
+                    # until enough of the oldest reservations age out that
+                    # the new call would fit. Walk events oldest-first,
+                    # subtracting until there's room.
+                    running = used
+                    tpm_delay = 0.0
+                    for t, n in self._token_events:
+                        if running + estimated_tokens <= self.tpm:
+                            break
+                        tpm_delay = max(0.0, (t + 60.0) - now)
+                        running -= n
                 delay = max(rpm_delay, tpm_delay)
-                if delay <= 0:
+                if delay <= 0 or now >= deadline:
                     self._next_allowed = max(now, self._next_allowed) + self.min_interval
                     self._token_events.append((now, estimated_tokens))
                     return
@@ -312,7 +333,16 @@ def get_groq_client():
             "GROQ_API_KEY environment variable not set. Get a free key at "
             "https://console.groq.com/keys"
         )
-    return Groq(api_key=api_key, max_retries=0)
+    # CRITICAL: explicit timeout. Without one, a hung connection (network
+    # hiccup, Groq being slow on a particular request, etc.) blocks forever
+    # with no exception ever raised — call_llm_batch's try/except never
+    # triggers, nothing logs, and the whole pipeline freezes on one batch
+    # indefinitely. This is what "stuck at 0% forever, same log line
+    # repeating, no error" in production was actually caused by. A 45s
+    # timeout is generous for what's normally a few-second completion, but
+    # short enough that a genuinely stuck call gets caught and retried
+    # instead of stalling the whole multi-state run.
+    return Groq(api_key=api_key, max_retries=0, timeout=45.0)
 
 
 def _strip_json_fences(text):
