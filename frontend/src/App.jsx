@@ -7,7 +7,7 @@ const API = "https://ai-for-payout-grid.onrender.com";
 // certified, per-state insurance rule files. The page is built like the cover
 // sheet of a regulatory filing — a sealed instrument, not a SaaS dashboard.
 //
-// Color    void #050608 · surface #0D1014 · recessed #07090C · hairline #1C2128
+// Color    base #1A1D22 · surface #262A31 · recessed #22262D · hairline #363C46
 //          ink #ECE8E0 · brass #C9A227 / #E0BB4A (hot) · ledger-green #4A8772
 //          oxide #A14B4B
 // Type     Fraunces (display serif, used once, large) · IBM Plex Sans (UI)
@@ -56,7 +56,7 @@ function timeNow() {
 
 function Seal({ status, size = 56 }) {
   const color = {
-    idle: "#3A4048",
+    idle: "#565D67",
     loading: "#C9A227",
     success: "#4A8772",
     error: "#A14B4B",
@@ -70,7 +70,7 @@ function Seal({ status, size = 56 }) {
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ position: "absolute", inset: 0 }}>
         <circle
           cx={size / 2} cy={size / 2} r={r}
-          fill="none" stroke="#1C2128" strokeWidth="1"
+          fill="none" stroke="#363C46" strokeWidth="1"
         />
         <circle
           cx={size / 2} cy={size / 2} r={r}
@@ -88,7 +88,7 @@ function Seal({ status, size = 56 }) {
           const y1 = size / 2 + Math.sin(a) * (r - 2);
           const x2 = size / 2 + Math.cos(a) * (r - 5);
           const y2 = size / 2 + Math.sin(a) * (r - 5);
-          return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#23282F" strokeWidth="1" />;
+          return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#40464F" strokeWidth="1" />;
         })}
         <circle
           cx={size / 2} cy={size / 2} r={2.4}
@@ -130,7 +130,7 @@ function UploadZone({ file, onFile, disabled }) {
         if (!disabled) handle(e.dataTransfer.files[0]);
       }}
       style={{
-        border: `1px solid ${dragging ? "#C9A227" : file ? "#3D5F52" : "#1C2128"}`,
+        border: `1px solid ${dragging ? "#C9A227" : file ? "#3D5F52" : "#363C46"}`,
         borderRadius: 4,
         padding: "26px 22px",
         cursor: disabled ? "not-allowed" : "pointer",
@@ -138,7 +138,7 @@ function UploadZone({ file, onFile, disabled }) {
           ? "linear-gradient(180deg, rgba(201,162,39,0.08), rgba(201,162,39,0.02))"
           : file
           ? "rgba(74,135,114,0.05)"
-          : "#07090C",
+          : "#22262D",
         transition: "border-color 0.15s, background 0.15s",
         position: "relative",
         opacity: disabled ? 0.5 : 1,
@@ -151,9 +151,9 @@ function UploadZone({ file, onFile, disabled }) {
 
       <div style={{
         width: 38, height: 38, borderRadius: 3, flexShrink: 0,
-        border: `1px solid ${file ? "#3D5F52" : "#23282F"}`,
+        border: `1px solid ${file ? "#3D5F52" : "#40464F"}`,
         display: "flex", alignItems: "center", justifyContent: "center",
-        background: "#0D1014",
+        background: "#262A31",
       }}>
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
           {file ? (
@@ -210,7 +210,7 @@ function StateSelector({ available, selected, onChange }) {
           {selected.length === 0 ? `ALL ${all.length} STATES` : `${selected.length} / ${all.length} SELECTED`}
         </span>
         <button onClick={toggleAll} style={{
-          background: "none", border: "1px solid #1C2128", borderRadius: 3,
+          background: "none", border: "1px solid #363C46", borderRadius: 3,
           color: "#9BA0A6", fontSize: 10.5, padding: "4px 10px", cursor: "pointer",
           fontFamily: "'IBM Plex Mono', monospace", letterSpacing: "0.04em",
         }}>
@@ -219,9 +219,9 @@ function StateSelector({ available, selected, onChange }) {
       </div>
       <div style={{
         display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(186px, 1fr))",
-        border: "1px solid #1C2128", borderRadius: 4, overflow: "hidden",
+        border: "1px solid #363C46", borderRadius: 4, overflow: "hidden",
         maxHeight: 322, overflowY: "auto",
-        background: "#07090C",
+        background: "#22262D",
       }}>
         {all.map((s) => {
           const on = selected.includes(s);
@@ -229,8 +229,8 @@ function StateSelector({ available, selected, onChange }) {
             <button key={s} onClick={() => toggle(s)} style={{
               background: on ? "rgba(201,162,39,0.09)" : "transparent",
               border: "none",
-              borderBottom: "1px solid #14171C",
-              borderRight: "1px solid #14171C",
+              borderBottom: "1px solid #2C313A",
+              borderRight: "1px solid #2C313A",
               color: on ? "#D9B546" : "#7A7F86",
               fontSize: 11.5, padding: "8px 10px", cursor: "pointer",
               textAlign: "left", fontWeight: on ? 600 : 400,
@@ -240,7 +240,7 @@ function StateSelector({ available, selected, onChange }) {
             }}>
               <span style={{
                 width: 5, height: 5, borderRadius: "50%", flexShrink: 0,
-                background: on ? "#D9B546" : "#2A2F36",
+                background: on ? "#D9B546" : "#454B55",
               }} />
               {s}
             </button>
@@ -270,7 +270,7 @@ function ProgressRail({ log }) {
           {pct}%
         </span>
       </div>
-      <div style={{ background: "#14171C", height: 2, borderRadius: 1, overflow: "hidden" }}>
+      <div style={{ background: "#2C313A", height: 2, borderRadius: 1, overflow: "hidden" }}>
         <div style={{
           height: "100%", width: `${pct}%`,
           background: done ? "#4A8772" : "linear-gradient(90deg, #C9A227, #E0BB4A)",
@@ -301,7 +301,7 @@ function ResultManifest({ files, zipFile, sessionId }) {
     <div>
       <div style={{
         display: "flex", justifyContent: "space-between", alignItems: "flex-end",
-        marginBottom: 20, paddingBottom: 18, borderBottom: "1px solid #1C2128",
+        marginBottom: 20, paddingBottom: 18, borderBottom: "1px solid #363C46",
       }}>
         <div>
           <div style={{ color: "#5C6168", fontSize: 10.5, fontFamily: "'IBM Plex Mono', monospace", letterSpacing: "0.08em", marginBottom: 6 }}>
@@ -324,26 +324,26 @@ function ResultManifest({ files, zipFile, sessionId }) {
         </div>
         {zipFile && (
           <a href={`${base}/${zipFile.filename}`} download style={{
-            background: "#C9A227", color: "#07090C", borderRadius: 3,
+            background: "#C9A227", color: "#22262D", borderRadius: 3,
             padding: "11px 20px", fontWeight: 700, fontSize: 12,
             textDecoration: "none", display: "flex", alignItems: "center", gap: 8,
             fontFamily: "'IBM Plex Mono', monospace", letterSpacing: "0.03em",
             boxShadow: "0 1px 0 rgba(255,255,255,0.15) inset",
           }}>
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-              <path d="M6 1.5V8M6 8L3 5M6 8L9 5M2 10.5H10" stroke="#07090C" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M6 1.5V8M6 8L3 5M6 8L9 5M2 10.5H10" stroke="#22262D" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
             DOWNLOAD ALL
           </a>
         )}
       </div>
 
-      <div style={{ border: "1px solid #1C2128", borderRadius: 4, overflow: "hidden" }}>
+      <div style={{ border: "1px solid #363C46", borderRadius: 4, overflow: "hidden" }}>
         {files.map((f, i) => (
           <div key={i} style={{
             display: "flex", justifyContent: "space-between", alignItems: "center",
             padding: "11px 16px",
-            borderBottom: i < files.length - 1 ? "1px solid #14171C" : "none",
+            borderBottom: i < files.length - 1 ? "1px solid #2C313A" : "none",
             background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.012)",
           }}
             onMouseEnter={e => e.currentTarget.style.background = "rgba(201,162,39,0.04)"}
@@ -468,7 +468,7 @@ export default function App() {
   return (
     <div style={{
       minHeight: "100vh",
-      background: "#050608",
+      background: "#1A1D22",
       fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
       color: "#9BA0A6",
     }}>
@@ -489,7 +489,7 @@ export default function App() {
 
         ::-webkit-scrollbar{width:4px;height:4px}
         ::-webkit-scrollbar-track{background:transparent}
-        ::-webkit-scrollbar-thumb{background:#23282F;border-radius:2px}
+        ::-webkit-scrollbar-thumb{background:#40464F;border-radius:2px}
         input[type=date]{color-scheme:dark}
 
         @media (max-width: 860px) {
@@ -509,7 +509,7 @@ export default function App() {
 
       {/* ── Hero / masthead ───────────────────────────────────────────────── */}
       <div style={{
-        borderBottom: "1px solid #1C2128",
+        borderBottom: "1px solid #363C46",
         background: "radial-gradient(ellipse 900px 400px at 15% -10%, rgba(201,162,39,0.06), transparent)",
       }}>
         <div style={{
@@ -558,7 +558,7 @@ export default function App() {
         display: "grid", gridTemplateColumns: "1.1fr 0.9fr",
       }}>
         {/* LEFT spine */}
-        <div style={{ borderRight: "1px solid #1C2128", paddingRight: 32 }}>
+        <div style={{ borderRight: "1px solid #363C46", paddingRight: 32 }}>
 
           <Step n="01" label="Source file" delay="0.05s">
             <UploadZone file={file} onFile={handleFile} disabled={processing} />
@@ -606,9 +606,9 @@ export default function App() {
               onClick={handleSubmit}
               disabled={!canSubmit}
               style={{
-                background: canSubmit ? "linear-gradient(180deg, #D9B546, #C9A227)" : "#12151A",
-                color: canSubmit ? "#07090C" : "#454A51",
-                border: canSubmit ? "1px solid #E0BB4A" : "1px solid #1C2128",
+                background: canSubmit ? "linear-gradient(180deg, #D9B546, #C9A227)" : "#262A31",
+                color: canSubmit ? "#22262D" : "#454A51",
+                border: canSubmit ? "1px solid #E0BB4A" : "1px solid #363C46",
                 borderRadius: 4, padding: "15px 0",
                 fontWeight: 700, fontSize: 13, cursor: canSubmit ? "pointer" : "not-allowed",
                 width: "100%",
@@ -655,7 +655,7 @@ export default function App() {
       {/* ── Results ───────────────────────────────────────────────────────── */}
       {result && (
         <div style={{ maxWidth: 1080, margin: "0 auto", padding: "36px 28px 64px" }}>
-          <div style={{ borderTop: "1px solid #1C2128", paddingTop: 36 }}>
+          <div style={{ borderTop: "1px solid #363C46", paddingTop: 36 }}>
             <ResultManifest
               files={result.files}
               zipFile={result.zip}
@@ -670,7 +670,7 @@ export default function App() {
                   FULL PROCESSING LOG ({result.progress.length} EVENTS)
                 </summary>
                 <div style={{
-                  background: "#07090C", border: "1px solid #1C2128", borderRadius: 4,
+                  background: "#22262D", border: "1px solid #363C46", borderRadius: 4,
                   padding: 14, marginTop: 10, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11,
                   color: "#6B7178", maxHeight: 220, overflowY: "auto",
                 }}>
@@ -686,10 +686,10 @@ export default function App() {
 
       {/* ── Footer ────────────────────────────────────────────────────────── */}
       <div style={{
-        borderTop: "1px solid #1C2128", padding: "18px 28px",
+        borderTop: "1px solid #363C46", padding: "18px 28px",
         display: "flex", justifyContent: "space-between", alignItems: "center",
         maxWidth: 1080, margin: "0 auto",
-        fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: "#2E3238",
+        fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: "#4A5159",
         letterSpacing: "0.04em",
       }}>
         <span>DIGIT 2W RULE ENGINE</span>
@@ -722,7 +722,7 @@ function StatBlock({ label, value, tone = "#ECE8E0" }) {
 
 function Step({ n, label, note, delay = "0s", children }) {
   return (
-    <div className="reveal" style={{ padding: "30px 0", borderBottom: "1px solid #14171C", animationDelay: delay }}>
+    <div className="reveal" style={{ padding: "30px 0", borderBottom: "1px solid #2C313A", animationDelay: delay }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 11, marginBottom: 18 }}>
         <span style={{
           fontFamily: "'IBM Plex Mono', monospace", color: "#C9A227", fontWeight: 600, fontSize: 11,
@@ -735,7 +735,7 @@ function Step({ n, label, note, delay = "0s", children }) {
         }}>
           {label}
         </span>
-        <span style={{ flex: 1, height: 1, background: "#14171C" }} />
+        <span style={{ flex: 1, height: 1, background: "#2C313A" }} />
         {note && (
           <span style={{
             color: "#5C6168", fontSize: 10.5, fontFamily: "'IBM Plex Mono', monospace",
@@ -758,7 +758,7 @@ const labelStyle = {
 
 const inputStyle = {
   width: "100%", boxSizing: "border-box",
-  background: "#07090C", border: "1px solid #1C2128",
+  background: "#22262D", border: "1px solid #363C46",
   borderRadius: 3, padding: "10px 11px",
   color: "#ECE8E0", fontSize: 13, outline: "none",
   fontFamily: "'IBM Plex Mono', monospace",
