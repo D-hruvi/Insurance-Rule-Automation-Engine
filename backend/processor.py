@@ -106,6 +106,22 @@ def normalize_make_1p5(make_raw):
         return "EXCLUDE: " + ", ".join(excluded)
     return EXCLUDE_OTHERS
 
+def _bajaj_only_brand(make_raw):
+    """
+    True if BAJAJ is the only *named* brand in make_raw once 'Others' is
+    stripped out (e.g. 'Bajaj', 'BAJAJ', 'Bajaj/Others' all → True).
+
+    Some clusters (e.g. NE_OR_GOOD) record the Bajaj EV rows with a make
+    cell like 'Bajaj/Others' instead of a plain 'Bajaj'. Left alone,
+    normalize_make_1p5() reads that as an EXCLUDE list, which is wrong for
+    a row that's fundamentally a Bajaj row. This lets callers force the
+    make back to plain 'BAJAJ' for these rows.
+    """
+    raw = str(make_raw).strip()
+    parts = [p.strip().upper() for p in raw.split("/")]
+    named = [p for p in parts if p != "OTHERS"]
+    return len(named) == 1 and named[0] == "BAJAJ"
+
 RTO_STATE_NAMES = {
     "AN": "ANDAMAN ISLANDS",   "AP": "ANDHRA PRADESH",
     "AR": "ARUNACHAL PRADESH", "AS": "ASSAM",
@@ -298,6 +314,9 @@ def seg_rows_1p5(make_raw, seg, cd2, rule_pfx, state, rto, counter, eff_s, eff_e
     s = str(seg).strip()
     pt, pp = resolve_payin(cd2)
     make = normalize_make_1p5(make_raw)
+    if _bajaj_only_brand(make_raw):
+        # Force plain 'BAJAJ' even if the source cell was e.g. 'Bajaj/Others'
+        make = "BAJAJ"
 
     def add(vt, fuel, ccf=None, cct=None, pwf=None, pwt=None, use_pp=True):
         nonlocal counter
@@ -312,14 +331,10 @@ def seg_rows_1p5(make_raw, seg, cd2, rule_pfx, state, rto, counter, eff_s, eff_e
                               eff_s, eff_e))
         counter += 1
 
-    # BAJAJ EV 3-7KW → 3 power-band rows (check raw make for brand identity)
-    if str(make_raw).strip().upper() == "BAJAJ" and s == "3-7 KW":
-        add("ALL", FUEL_EV, pwf=3.00, pwt=7.00)
-        add("ALL", FUEL_EV, pwf=0.10, pwt=2.90, use_pp=False)
-        add("ALL", FUEL_EV, pwf=7.10, pwt=100.00, use_pp=False)
-        return rows, counter
-
-    # EV power bands
+    # EV power bands. Vehicle Type = ALL for these (confirmed against reference
+    # output — Bajaj's 3-band EV rows and most clusters' generic EV rows use
+    # ALL, not Bike; a Bike-only override for a specific band is a per-cluster
+    # source-data choice, not a fixed rule, so we don't force it here).
     if s in ("< 3 KW", "< 7 KW"):
         add("ALL", FUEL_EV, pwf=0.10, pwt=2.90)
     elif s in (">3 KW", "> 3 KW", ">7 KW", "> 7 KW"):
@@ -383,13 +398,14 @@ def make_field_1p1(seg):
     if s == "MC_180-350_RE":
         return "ROYAL ENFIELD", "ALL"
     if s == "MC_180-350_HONDA/JAWA/Avenger":
-        # Reference: make = HONDA, JAWA MOTORCYCLE, BAJAJ
-        #            model = long Avenger exclude list
+        # Reference confirms: make = HONDA, JAWA MOTORCYCLE, BAJAJ
+        #                     model = long Avenger exclude list
         return "HONDA, JAWA MOTORCYCLE, BAJAJ", AVENGER_EXCLUDE_MODEL
     if s in ("MC_180-350_Other than RE", "MC_180-350_Others"):
-        # Reference: make = EXCLUDE: BAJAJ, HONDA, ROYAL ENFIELD, JAWA MOTORCYCLE
-        #            model = BAJAJ|AVENGER list (the Avenger models)
-        return "EXCLUDE: BAJAJ, HONDA, ROYAL ENFIELD, JAWA MOTORCYCLE", AVENGER_MODEL
+        # Reference confirms: make = EXCLUDE: BAJAJ, HONDA, ROYAL ENFIELD, JAWA MOTORCYCLE
+        #                     model = "BAJAJ|AVENGER" (just the one entry,
+        #                     not the long list of individual Bajaj models)
+        return "EXCLUDE: BAJAJ, HONDA, ROYAL ENFIELD, JAWA MOTORCYCLE", "BAJAJ|AVENGER"
     if s == "MC>350":
         return "ALL", "ALL"
     return "ALL", "ALL"
@@ -429,12 +445,44 @@ def gen_1p5(d, eff_s, eff_e, counter, state_filter=None):
         rto_f = _rto_field(rtos)
         pfx = _abbr(cluster)
 
+        # Detect Bajaj EV low/high segments provided as two separate source
+        # rows (e.g. NE_OR_GOOD) rather than a single combined "3-7 KW" row.
+        # In that case the middle 3.00–7.00 KW band never gets generated, so
+        # track it here to add it after the normal per-entry pass.
+        bajaj_low = None
+        bajaj_high = None
+        bajaj_mid_present = False
+        for e in entries:
+            if _bajaj_only_brand(e["make"]):
+                seg_s = str(e["seg"]).strip()
+                if seg_s in ("< 3 KW", "< 7 KW"):
+                    bajaj_low = e
+                elif seg_s in (">3 KW", "> 3 KW", ">7 KW", "> 7 KW"):
+                    bajaj_high = e
+                elif seg_s == "3-7 KW":
+                    bajaj_mid_present = True
+
         for e in entries:
             make_raw = e["make"]
             new_rows, counter = seg_rows_1p5(make_raw, e["seg"], e["cd2"],
                                              pfx, state, rto_f,
                                              counter, eff_s, eff_e)
             rows.extend(new_rows)
+
+        if bajaj_low and bajaj_high and not bajaj_mid_present:
+            # NOTE/assumption: the middle band's PayIn is taken from the
+            # low-band entry's rate, since the source doesn't give a rate
+            # for a combined 3-7 KW row in this case. Check this against the
+            # reference output and adjust if the real rate should differ.
+            pt, pp = resolve_payin(bajaj_low["cd2"])
+            name = f"{pfx}_new_com_{counter}_TW"
+            rows.append(build_row(name, state, rto_f,
+                                  "Comprehensive", "new", "ALL",
+                                  "ALL", FUEL_EV, "BAJAJ", "ALL",
+                                  None, None,
+                                  fmt_power(3.00), fmt_power(7.00),
+                                  pt, pp, eff_s, eff_e))
+            counter += 1
 
     return rows, counter
 
