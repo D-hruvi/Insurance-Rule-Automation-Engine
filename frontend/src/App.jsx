@@ -171,7 +171,7 @@ function UploadZone({ file, onFile, disabled }) {
               {file.name}
             </div>
             <div style={{ color: "#5C6168", fontSize: 11.5, marginTop: 3, fontFamily: "'IBM Plex Mono', monospace" }}>
-              {formatBytes(file.size)} received — click to replace
+              {formatBytes(file.size)} received, click to replace
             </div>
           </>
         ) : (
@@ -180,7 +180,7 @@ function UploadZone({ file, onFile, disabled }) {
               Drop the commission grid workbook
             </div>
             <div style={{ color: "#4A4F56", fontSize: 11.5, marginTop: 3, fontFamily: "'IBM Plex Mono', monospace" }}>
-              .XLSX — TW 1+5, 1+1 / SATP, SAOD, RTO, 5+5 GRID SHEETS
+              .XLSX · TW 1+5, 1+1 / SATP, SAOD, RTO, 5+5 GRID SHEETS
             </div>
           </>
         )}
@@ -535,7 +535,7 @@ export default function App() {
               <div style={{
                 fontSize: 13, color: "#6B7178", marginTop: 9, maxWidth: 420, lineHeight: 1.5,
               }}>
-                Upload a broker commission grid. Receive certified, state-wise payout rule files — one per jurisdiction.
+                Upload a broker commission grid. Receive certified, state-wise payout rule files, one per jurisdiction.
               </div>
             </div>
           </div>
@@ -628,7 +628,7 @@ export default function App() {
                 borderRadius: 4, padding: "12px 16px", color: "#C98888", fontSize: 12.5,
                 marginTop: 14, fontFamily: "'IBM Plex Mono', monospace",
               }}>
-                ERROR — {error}
+                ERROR: {error}
               </div>
             )}
 
