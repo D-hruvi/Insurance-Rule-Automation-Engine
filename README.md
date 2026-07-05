@@ -1,6 +1,6 @@
 # Insurance Rule Automation Engine
 
-**Turn a multi-sheet TW commission grid into certified, per-state insurance rule files — in one click.**
+**Turn a multi-sheet TW commission grid into certified, per-state insurance rule files in one click.**
 
 🔗 **Live app:** [insurance-rule-automation-engine.onrender.com](https://insurance-rule-automation-engine.onrender.com/)
 
@@ -15,7 +15,7 @@ This tool automates the whole pipeline:
 1. **Upload** the source commission grid workbook (`.xlsx`)
 2. **Set** the effective date range for the rules
 3. **Pick** one, several, or all states found in the file
-4. **Generate** a fully-formatted output workbook per state — ready to hand to the rating engine — plus a single zip of everything
+4. **Generate** a fully-formatted output workbook per state — ready to hand to the rating engine plus a single zip of everything
 
 ## How it works
 
