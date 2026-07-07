@@ -645,14 +645,30 @@ def generate_for_state(d, state_name, eff_s, eff_e, counter_start=1):
     return rows, counter
 
 def process_all(input_path, output_dir, eff_s, eff_e,
-                states=None, progress_callback=None):
+                states=None, progress_callback=None,
+                output_mode="per_state", combined_filename=None):
+    """
+    output_mode:
+      "per_state" - one workbook per state (default, original behavior)
+      "combined"  - a single workbook containing every selected state's rows
+      "both"      - per-state workbooks AND one combined workbook
+
+    Rule Code numbering runs continuously across the whole run (not reset
+    per state), so codes stay unique whether they land in per-state files
+    or the combined file.
+    """
     os.makedirs(output_dir, exist_ok=True)
     if progress_callback:
         progress_callback("Loading source data...", 0, 1)
     d = load_input_data(input_path)
     all_states = get_all_states(d)
     targets = [s for s in all_states if (states is None or s in states)]
+
+    want_per_state = output_mode in ("per_state", "both")
+    want_combined = output_mode in ("combined", "both")
+
     generated = []
+    combined_rows = []
     counter = 1
     for idx, state in enumerate(targets):
         if progress_callback:
@@ -660,10 +676,22 @@ def process_all(input_path, output_dir, eff_s, eff_e,
         rows, counter = generate_for_state(d, state, eff_s, eff_e, counter)
         if not rows:
             continue
-        fname = state.replace(", ", "_").replace(" ", "").replace(",", "_") + "_2W.xlsx"
+        if want_per_state:
+            fname = state.replace(", ", "_").replace(" ", "").replace(",", "_") + "_2W.xlsx"
+            out = os.path.join(output_dir, fname)
+            write_output_excel(rows, out)
+            generated.append(out)
+        if want_combined:
+            combined_rows.extend(rows)
+
+    if want_combined and combined_rows:
+        fname = combined_filename or "Combined_States_2W.xlsx"
+        if not fname.lower().endswith(".xlsx"):
+            fname += ".xlsx"
         out = os.path.join(output_dir, fname)
-        write_output_excel(rows, out)
+        write_output_excel(combined_rows, out)
         generated.append(out)
+
     if progress_callback:
         progress_callback("Complete!", len(targets), len(targets))
     return generated

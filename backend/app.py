@@ -65,10 +65,12 @@ def process():
     """
     Process Excel and generate output files.
     Form fields:
-      file          - The input .xlsx file
-      effect_start  - e.g. "2026-02-01"
-      effect_end    - e.g. "2026-02-28"
-      states        - JSON array of state names (optional; omit for all)
+      file             - The input .xlsx file
+      effect_start     - e.g. "2026-02-01"
+      effect_end       - e.g. "2026-02-28"
+      states           - JSON array of state names (optional; omit for all)
+      output_mode      - "per_state" (default), "combined", or "both"
+      combined_filename- optional custom filename for the combined workbook
     """
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
@@ -82,6 +84,11 @@ def process():
 
     states_raw = request.form.get("states", None)
     states = json.loads(states_raw) if states_raw else None
+
+    output_mode = request.form.get("output_mode", "per_state")
+    if output_mode not in ("per_state", "combined", "both"):
+        return jsonify({"error": "output_mode must be one of: per_state, combined, both"}), 400
+    combined_filename = request.form.get("combined_filename") or None
 
     session_id = str(uuid.uuid4())[:8]
     save_path = os.path.join(UPLOAD_DIR, f"{session_id}_{f.filename}")
@@ -100,7 +107,9 @@ def process():
             save_path, out_dir,
             effect_start, effect_end,
             states=states,
-            progress_callback=progress_cb
+            progress_callback=progress_cb,
+            output_mode=output_mode,
+            combined_filename=combined_filename
         )
 
         # Create a zip of all output files

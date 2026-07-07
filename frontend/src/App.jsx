@@ -251,6 +251,51 @@ function StateSelector({ available, selected, onChange }) {
   );
 }
 
+function OutputModeSelector({ mode, onChange }) {
+  const options = [
+    { key: "per_state", label: "PER STATE", note: "one file per state" },
+    { key: "combined", label: "COMBINED", note: "one file, all states" },
+    { key: "both", label: "BOTH", note: "per-state + combined" },
+  ];
+  return (
+    <div style={{
+      display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8,
+      marginBottom: 16,
+    }}>
+      {options.map(o => {
+        const on = mode === o.key;
+        return (
+          <button key={o.key} onClick={() => onChange(o.key)} style={{
+            background: on ? "rgba(201,162,39,0.09)" : "#22262D",
+            border: `1px solid ${on ? "#C9A227" : "#363C46"}`,
+            borderRadius: 4, padding: "10px 8px",
+            cursor: "pointer", textAlign: "left",
+            transition: "border-color 0.15s, background 0.15s",
+          }}>
+            <div style={{
+              color: on ? "#D9B546" : "#B8BCC2", fontSize: 11.5, fontWeight: 700,
+              fontFamily: "'IBM Plex Mono', monospace", letterSpacing: "0.04em",
+              display: "flex", alignItems: "center", gap: 6,
+            }}>
+              <span style={{
+                width: 5, height: 5, borderRadius: "50%", flexShrink: 0,
+                background: on ? "#D9B546" : "#454B55",
+              }} />
+              {o.label}
+            </div>
+            <div style={{
+              color: "#5C6168", fontSize: 10.5, marginTop: 4,
+              fontFamily: "'IBM Plex Mono', monospace",
+            }}>
+              {o.note}
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function ProgressRail({ log }) {
   if (!log || log.length === 0) return null;
   const last = log[log.length - 1];
@@ -315,7 +360,7 @@ function ResultManifest({ files, zipFile, sessionId }) {
               {files.length}
             </span>
             <span style={{ color: "#B8BCC2", fontSize: 14.5 }}>
-              state files certified
+              {files.length === 1 ? "file certified" : "files certified"}
             </span>
             <span style={{ color: "#454A51", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
               {zipFile && formatBytes(zipFile.size_bytes)}
@@ -385,6 +430,7 @@ export default function App() {
   const [selectedStates, setSelectedStates] = useState([]);
   const [statesLoading, setStatesLoading] = useState(false);
   const [sessionId, setSessionId] = useState(null);
+  const [outputMode, setOutputMode] = useState("per_state"); // per_state | combined | both
 
   const [status, setStatus] = useState("idle"); // idle | loading | success | error
   const [progress, setProgress] = useState([]);
@@ -438,6 +484,7 @@ export default function App() {
     fd.append("effect_end", effEnd);
     if (selectedStates.length > 0)
       fd.append("states", JSON.stringify(selectedStates));
+    fd.append("output_mode", outputMode);
 
     let tick = 0;
     const ticker = setInterval(() => {
@@ -643,6 +690,7 @@ export default function App() {
             <div style={{ color: "#454A51", fontSize: 11.5, marginBottom: 14, fontFamily: "'IBM Plex Mono', monospace" }}>
               LEAVE BLANK TO PROCESS EVERY STATE IN THE FILE
             </div>
+            <OutputModeSelector mode={outputMode} onChange={setOutputMode} />
             <StateSelector
               available={availableStates}
               selected={selectedStates}
