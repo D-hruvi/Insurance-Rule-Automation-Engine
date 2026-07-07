@@ -43,7 +43,10 @@ KNOWN_BRANDS_ORDERED = ["BAJAJ", "HERO MOTOCORP", "HONDA", "JAWA MOTORCYCLE",
                         "ROYAL ENFIELD", "SUZUKI", "TVS", "YAMAHA"]
 KNOWN_BRANDS_SET = {b.upper() for b in KNOWN_BRANDS_ORDERED}
 
-# Full model string for the Avenger row (MC_180-350_HONDA/JAWA/Avenger)
+# Full model string for the Avenger row (MC_180-350_HONDA/JAWA/Avenger).
+# NOTE: no longer used in make_field_1p1 as of the latest fix — that row's
+# Model is now just "BAJAJ|AVENGER" (see change 3). Kept here for reference
+# only; safe to delete if it's not needed elsewhere.
 AVENGER_EXCLUDE_MODEL = (
     "EXCLUDE: BAJAJ|ASPIRE, BAJAJ|BOXER, BAJAJ|BOXER 150, BAJAJ|BYK, BAJAJ|CALIBER, "
     "BAJAJ|CT 100, BAJAJ|CUB, BAJAJ|DISCOVER, BAJAJ|DISCOVER 112, BAJAJ|DISCOVER 125, "
@@ -109,18 +112,29 @@ def normalize_make_1p5(make_raw):
 def _bajaj_only_brand(make_raw):
     """
     True if BAJAJ is the only *named* brand in make_raw once 'Others' is
-    stripped out (e.g. 'Bajaj', 'BAJAJ', 'Bajaj/Others' all → True).
+    stripped out (e.g. 'Bajaj', 'BAJAJ', 'Bajaj/Others', 'Bajaj, Others'
+    all → True).
 
     Some clusters (e.g. NE_OR_GOOD) record the Bajaj EV rows with a make
     cell like 'Bajaj/Others' instead of a plain 'Bajaj'. Left alone,
     normalize_make_1p5() reads that as an EXCLUDE list, which is wrong for
     a row that's fundamentally a Bajaj row. This lets callers force the
     make back to plain 'BAJAJ' for these rows.
+
+    Splits on both '/' and ',' so minor source-formatting differences
+    (slash-separated vs comma-separated) don't cause this to miss.
     """
-    raw = str(make_raw).strip()
-    parts = [p.strip().upper() for p in raw.split("/")]
+    raw = str(make_raw).strip().replace(",", "/")
+    parts = [p.strip().upper() for p in raw.split("/") if p.strip()]
     named = [p for p in parts if p != "OTHERS"]
     return len(named) == 1 and named[0] == "BAJAJ"
+
+
+def _norm_seg(seg):
+    """Collapse whitespace and upper-case a segment label for robust
+    comparisons (so '< 3 KW', '<3 KW', '<  3 kw' all match the same
+    way)."""
+    return " ".join(str(seg).strip().split()).upper()
 
 RTO_STATE_NAMES = {
     "AN": "ANDAMAN ISLANDS",   "AP": "ANDHRA PRADESH",
@@ -312,6 +326,7 @@ def _rto_field(rtos):
 def seg_rows_1p5(make_raw, seg, cd2, rule_pfx, state, rto, counter, eff_s, eff_e):
     rows = []
     s = str(seg).strip()
+    s_norm = _norm_seg(s)
     pt, pp = resolve_payin(cd2)
     make = normalize_make_1p5(make_raw)
     if _bajaj_only_brand(make_raw):
@@ -331,38 +346,40 @@ def seg_rows_1p5(make_raw, seg, cd2, rule_pfx, state, rto, counter, eff_s, eff_e
                               eff_s, eff_e))
         counter += 1
 
-    # EV power bands. Vehicle Type = ALL for these (confirmed against reference
-    # output — Bajaj's 3-band EV rows and most clusters' generic EV rows use
-    # ALL, not Bike; a Bike-only override for a specific band is a per-cluster
-    # source-data choice, not a fixed rule, so we don't force it here).
-    if s in ("< 3 KW", "< 7 KW"):
-        add("ALL", FUEL_EV, pwf=0.10, pwt=2.90)
-    elif s in (">3 KW", "> 3 KW", ">7 KW", "> 7 KW"):
-        add("ALL", FUEL_EV, pwf=3.10, pwt=100.00)
-    elif s == "3-7 KW":
-        add("ALL", FUEL_EV, pwf=3.00, pwt=7.00)
-        add("ALL", FUEL_EV, pwf=0.10, pwt=2.90, use_pp=False)
-        add("ALL", FUEL_EV, pwf=7.10, pwt=100.00, use_pp=False)
-    elif s == "EV":
-        add("ALL", FUEL_EV)
-    elif s == "SCOOTER/EV":
+    # EV power bands. Vehicle Type = Bike (not ALL) for any row that is
+    # VehicleType=ALL + Fuel=Electric. Reasoning: "Scooter" + Fuel=ALL
+    # (the plain "SCOOTER" segment below) already includes electric for
+    # scooters, so a separate VehicleType=ALL + Fuel=Electric row would
+    # double up the scooter/electric combination. To avoid that overlap,
+    # any generic EV row that isn't scooter-specific is scoped to Bike.
+    if s_norm in ("< 3 KW", "< 7 KW"):
+        add("Bike", FUEL_EV, pwf=0.10, pwt=2.90)
+    elif s_norm in (">3 KW", "> 3 KW", ">7 KW", "> 7 KW"):
+        add("Bike", FUEL_EV, pwf=3.10, pwt=100.00)
+    elif s_norm == "3-7 KW":
+        add("Bike", FUEL_EV, pwf=3.00, pwt=7.00)
+        add("Bike", FUEL_EV, pwf=0.10, pwt=2.90, use_pp=False)
+        add("Bike", FUEL_EV, pwf=7.10, pwt=100.00, use_pp=False)
+    elif s_norm == "EV":
+        add("Bike", FUEL_EV)
+    elif s_norm == "SCOOTER/EV":
         add("Scooter", FUEL_EV)
     # Bike CC bands
-    elif s == "MC <=155":
+    elif s_norm == "MC <=155":
         add("Bike", FUEL_PETROL, ccf=1, cct=155)
-    elif s == "MC >155":
+    elif s_norm == "MC >155":
         add("Bike", FUEL_PETROL, ccf=156, cct=9999)
-    elif s == "MC":
+    elif s_norm == "MC":
         add("Bike", FUEL_PETROL)
-    elif s == "SCOOTER":
+    elif s_norm == "SCOOTER":
         add("Scooter", FUEL_ALL)
-    elif s == "SCOOTER/MC":
+    elif s_norm == "SCOOTER/MC":
         add("ALL", FUEL_PETROL)
-    elif s in ("< =350", "<= 350"):
+    elif s_norm in ("< =350", "<= 350", "<=350"):
         add("ALL", FUEL_PETROL, ccf=1, cct=350)
-    elif s in ("> 350", ">350"):
+    elif s_norm in ("> 350", ">350"):
         add("ALL", FUEL_PETROL, ccf=351, cct=9999)
-    elif s in ("All", "ALL"):
+    elif s_norm == "ALL":
         add("ALL", FUEL_ALL)
     else:
         add("ALL", FUEL_ALL)
@@ -398,9 +415,10 @@ def make_field_1p1(seg):
     if s == "MC_180-350_RE":
         return "ROYAL ENFIELD", "ALL"
     if s == "MC_180-350_HONDA/JAWA/Avenger":
-        # Reference confirms: make = HONDA, JAWA MOTORCYCLE, BAJAJ
-        #                     model = long Avenger exclude list
-        return "HONDA, JAWA MOTORCYCLE, BAJAJ", AVENGER_EXCLUDE_MODEL
+        # make = HONDA, JAWA MOTORCYCLE, BAJAJ; model is just the single
+        # "BAJAJ|AVENGER" entry, not the long list of individual Bajaj
+        # models.
+        return "HONDA, JAWA MOTORCYCLE, BAJAJ", "BAJAJ|AVENGER"
     if s in ("MC_180-350_Other than RE", "MC_180-350_Others"):
         # Reference confirms: make = EXCLUDE: BAJAJ, HONDA, ROYAL ENFIELD, JAWA MOTORCYCLE
         #                     model = "BAJAJ|AVENGER" (just the one entry,
@@ -454,7 +472,7 @@ def gen_1p5(d, eff_s, eff_e, counter, state_filter=None):
         bajaj_mid_present = False
         for e in entries:
             if _bajaj_only_brand(e["make"]):
-                seg_s = str(e["seg"]).strip()
+                seg_s = _norm_seg(e["seg"])
                 if seg_s in ("< 3 KW", "< 7 KW"):
                     bajaj_low = e
                 elif seg_s in (">3 KW", "> 3 KW", ">7 KW", "> 7 KW"):
@@ -478,7 +496,7 @@ def gen_1p5(d, eff_s, eff_e, counter, state_filter=None):
             name = f"{pfx}_new_com_{counter}_TW"
             rows.append(build_row(name, state, rto_f,
                                   "Comprehensive", "new", "ALL",
-                                  "ALL", FUEL_EV, "BAJAJ", "ALL",
+                                  "Bike", FUEL_EV, "BAJAJ", "ALL",
                                   None, None,
                                   fmt_power(3.00), fmt_power(7.00),
                                   pt, pp, eff_s, eff_e))
@@ -548,12 +566,12 @@ def gen_1p1(d, eff_s, eff_e, counter, state_filter=None):
             pts, pps = resolve_payin(ev_cd2_tp)
             rows.append(build_row(f"{pfx}_ALL_EV_RR", state, rto_f,
                                   "Comprehensive", "renew, rollover", "ALL",
-                                  "ALL", FUEL_EV, "ALL", "ALL",
+                                  "Bike", FUEL_EV, "ALL", "ALL",
                                   None, None, None, None,
                                   pt1, pp1, eff_s, eff_e))
             rows.append(build_row(f"{pfx}_TP_EV_1", state, rto_f,
                                   "TP", "ALL", "ALL",
-                                  "ALL", FUEL_EV, "ALL", "ALL",
+                                  "Bike", FUEL_EV, "ALL", "ALL",
                                   None, None, None, None,
                                   pts, pps, eff_s, eff_e))
 
