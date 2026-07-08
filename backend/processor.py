@@ -1,5 +1,5 @@
 """
-Digit 2W Insurance Commission Grid Processor  v3
+Digit 2W Insurance Commission Grid Processor  v4
 Key fixes:
   - POSP = PayIn * 0.8 always (confirmed from reference)
   - Fuel order: Petrol, LPG, Diesel, CNG  (matches reference)
@@ -7,9 +7,19 @@ Key fixes:
   - SAOD Royal Enfield VehicleType = Bike (not ALL)
   - SAOD cluster case-insensitive matching fixed
   - Make field: 'Others' -> EXCLUDE list with reference brand order
+    (HERO MOTOCORP, BAJAJ, HONDA, ROYAL ENFIELD, TVS, SUZUKI, YAMAHA —
+    NOT alphabetical; fixed v4, was a "Make Issue" in QA review)
   - Rule name: STATE_new_com_N_TW format using cluster abbreviation
   - 1+1 ordering: all RR rows, then all TP rows per cluster block
   - EV bonus rows at end of each 1+1 cluster block
+  - TW 1+5 EV power-band rows (< 3KW, 3-7KW, >7KW, plain EV) now use
+    Vehicle Type = ALL, not Bike (fixed v4, was a "Vehicle Type" bug in
+    QA review — 1+1 sheet EV bonus rows correctly stay Bike and are
+    unaffected by this fix)
+  - 1+1 "MC_180-350_Other than RE" / "..._Others" segment now excludes
+    only ROYAL ENFIELD with Model=ALL, instead of incorrectly excluding
+    BAJAJ/HONDA/JAWA too and restricting Model to "BAJAJ|AVENGER" (fixed
+    v4, was a "Make model Exclude Issue" in QA review)
 """
 
 import os
@@ -35,7 +45,7 @@ MISP_RATE = 22.5
 FUEL_PETROL = "Petrol, CNG, LPG, Diesel"   # Fixed order to match reference output
 FUEL_ALL    = "ALL"
 FUEL_EV     = "Electric"
-EXCLUDE_OTHERS = "EXCLUDE: BAJAJ, HERO MOTOCORP, HONDA, ROYAL ENFIELD, SUZUKI, TVS, YAMAHA"  # alphabetical
+EXCLUDE_OTHERS = "EXCLUDE: HERO MOTOCORP, BAJAJ, HONDA, ROYAL ENFIELD, TVS, SUZUKI, YAMAHA"  # reference brand order (not alphabetical)
 
 # Canonical brand list used for computing EXCLUDE when "Others" appears in slash groups
 # Order matters: preserve alphabetical for EXCLUDE computations
@@ -353,15 +363,15 @@ def seg_rows_1p5(make_raw, seg, cd2, rule_pfx, state, rto, counter, eff_s, eff_e
     # double up the scooter/electric combination. To avoid that overlap,
     # any generic EV row that isn't scooter-specific is scoped to Bike.
     if s_norm in ("< 3 KW", "< 7 KW"):
-        add("Bike", FUEL_EV, pwf=0.10, pwt=2.90)
+        add("ALL", FUEL_EV, pwf=0.10, pwt=2.90)
     elif s_norm in (">3 KW", "> 3 KW", ">7 KW", "> 7 KW"):
-        add("Bike", FUEL_EV, pwf=3.10, pwt=100.00)
+        add("ALL", FUEL_EV, pwf=3.10, pwt=100.00)
     elif s_norm == "3-7 KW":
-        add("Bike", FUEL_EV, pwf=3.00, pwt=7.00)
-        add("Bike", FUEL_EV, pwf=0.10, pwt=2.90, use_pp=False)
-        add("Bike", FUEL_EV, pwf=7.10, pwt=100.00, use_pp=False)
+        add("ALL", FUEL_EV, pwf=3.00, pwt=7.00)
+        add("ALL", FUEL_EV, pwf=0.10, pwt=2.90, use_pp=False)
+        add("ALL", FUEL_EV, pwf=7.10, pwt=100.00, use_pp=False)
     elif s_norm == "EV":
-        add("Bike", FUEL_EV)
+        add("ALL", FUEL_EV)
     elif s_norm == "SCOOTER/EV":
         add("Scooter", FUEL_EV)
     # Bike CC bands
@@ -420,10 +430,12 @@ def make_field_1p1(seg):
         # models.
         return "HONDA, JAWA MOTORCYCLE, BAJAJ", "BAJAJ|AVENGER"
     if s in ("MC_180-350_Other than RE", "MC_180-350_Others"):
-        # Reference confirms: make = EXCLUDE: BAJAJ, HONDA, ROYAL ENFIELD, JAWA MOTORCYCLE
-        #                     model = "BAJAJ|AVENGER" (just the one entry,
-        #                     not the long list of individual Bajaj models)
-        return "EXCLUDE: BAJAJ, HONDA, ROYAL ENFIELD, JAWA MOTORCYCLE", "BAJAJ|AVENGER"
+        # "Other than RE" is the broad catch-all for this CC band: it should
+        # exclude only Royal Enfield (which has its own dedicated row above)
+        # and apply to ALL models, not be narrowed to the Avenger model.
+        # The HONDA/JAWA/Avenger row is a separate, more specific carve-out
+        # that coexists with (and takes precedence over) this broader rule.
+        return "EXCLUDE: ROYAL ENFIELD", "ALL"
     if s == "MC>350":
         return "ALL", "ALL"
     return "ALL", "ALL"
@@ -496,7 +508,7 @@ def gen_1p5(d, eff_s, eff_e, counter, state_filter=None):
             name = f"{pfx}_new_com_{counter}_TW"
             rows.append(build_row(name, state, rto_f,
                                   "Comprehensive", "new", "ALL",
-                                  "Bike", FUEL_EV, "BAJAJ", "ALL",
+                                  "ALL", FUEL_EV, "BAJAJ", "ALL",
                                   None, None,
                                   fmt_power(3.00), fmt_power(7.00),
                                   pt, pp, eff_s, eff_e))
