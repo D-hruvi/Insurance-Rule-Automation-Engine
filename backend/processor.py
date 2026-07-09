@@ -204,9 +204,13 @@ CLUSTER_ABBR = {
     "UK": "UK", "WB": "WB",
 }
 
+CLUSTER_ABBR_CI = {k.strip().upper(): v for k, v in CLUSTER_ABBR.items()}
+
 def _abbr(cluster):
-    return CLUSTER_ABBR.get(cluster,
-        cluster.replace(" ","").replace(",","_").replace("+","_")[:10].upper())
+    hit = CLUSTER_ABBR_CI.get(str(cluster).strip().upper())
+    if hit is not None:
+        return hit
+    return cluster.replace(" ", "").replace(",", "_").replace("+", "_")[:10].upper()
 
 # ── PayIn helpers ─────────────────────────────────────────────
 
@@ -286,25 +290,31 @@ def load_input_data(path):
         if r[1]:
             d["rto"][r[1]] = {"1p1": r[2], "1p5": r[3], "saod": r[4]}
 
-    # Build cluster->rto lookups; saod uses uppercase keys from RTO col
+    # Build cluster->rto lookups. Source sheets are inconsistent about
+    # cluster-name casing (e.g. 'NE_OR_GOOD' for some brand rows vs
+    # 'NE_OR_Good' for others, with only one spelling present in the RTO
+    # sheet). An exact-string match would silently drop the mismatched
+    # group's rows entirely (rtos == [] -> generator skips it). To avoid
+    # that, ALL three product types key their cluster->rto lookup on the
+    # case-normalized (stripped+uppercased) cluster name, not just saod.
     for prod in ("1p1", "1p5", "saod"):
         key = f"c_{prod}"
         d[key] = {}
         for rto, c in d["rto"].items():
             cl = c.get(prod)
             if cl:
-                cl_key = cl.strip().upper() if prod == "saod" else cl.strip()
+                cl_key = cl.strip().upper()
                 d[key].setdefault(cl_key, []).append(rto)
 
     ws = wb["TW 1+5"]
     d["tw_1p5"] = [
-        {"cluster": r[1], "make": r[2], "seg": r[3], "cd2": r[5]}
+        {"cluster": str(r[1]).strip().upper(), "make": r[2], "seg": r[3], "cd2": r[5]}
         for r in ws.iter_rows(values_only=True) if r[1] and r[2] and r[3]
     ]
 
     ws = wb["TW 1+1 & SATP"]
     d["tw_1p1"] = [
-        {"cluster": r[1], "seg": r[2], "cd2_1p1": r[4], "cd2_satp": r[5]}
+        {"cluster": str(r[1]).strip().upper(), "seg": r[2], "cd2_1p1": r[4], "cd2_satp": r[5]}
         for r in ws.iter_rows(values_only=True) if r[1] and r[2] and r[3] is not None
     ]
 
