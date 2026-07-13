@@ -26,6 +26,27 @@ Key fixes:
     v4, was a "Make model Exclude Issue" in QA review). CONFIRMED v5: the
     HONDA/JAWA/Avenger row's own Model stays "BAJAJ|AVENGER" (not the
     full Bajaj model list) — this was already correct and unchanged.
+
+  v6 fixes (QA review against ODISHA reference output):
+  - TW 1+5 generic EV power-band rows (< 3KW, 3-7KW, >7KW, plain EV) are
+    Vehicle Type = ALL, NOT Bike. The v5 "confirmed" reasoning above (that
+    Bike avoids double-counting with the plain SCOOTER segment) was WRONG
+    per the reference output; reverted back to ALL for these rows and for
+    the Bajaj 3-7KW gap-filler row in gen_1p5.
+  - TW 1+5 "> 3 KW" and "> 7 KW" are different bands (3.10-100.00 vs
+    7.10-100.00 respectively), not the same band. The old code collapsed
+    both into 3.10-100.00.
+  - TW 1+5 "3-7 KW" no longer synthesizes compensating 0%-payin rows for
+    the bands below 3KW / above 7KW. When a cluster/make has its own real
+    "< 3 KW"/"< 7 KW" and "> 3 KW"/"> 7 KW" entries (e.g. NE_OR_Good), the
+    old compensating rows duplicated and stomped those real rates with a
+    bogus 0%.
+  - 1+1 "SC/EV" segment Fuel Type is ALL, not Petrol-only — it must cover
+    both petrol and electric scooters.
+  - 1+1 "MC_180-350_Other than RE" / "..._Others" now excludes ROYAL
+    ENFIELD, HONDA, and JAWA MOTORCYCLE (not just RE), and its Model is
+    "EXCLUDE: BAJAJ|AVENGER" (not ALL), since HONDA/JAWA/BAJAJ|Avenger are
+    already covered by the dedicated MC_180-350_HONDA/JAWA/Avenger row.
 """
 
 import os
@@ -372,22 +393,42 @@ def seg_rows_1p5(make_raw, seg, cd2, rule_pfx, state, rto, counter, eff_s, eff_e
                               eff_s, eff_e))
         counter += 1
 
-    # EV power bands. Vehicle Type = Bike (not ALL) for any row that is
-    # VehicleType=ALL + Fuel=Electric. Reasoning: "Scooter" + Fuel=ALL
-    # (the plain "SCOOTER" segment below) already includes electric for
-    # scooters, so a separate VehicleType=ALL + Fuel=Electric row would
-    # double up the scooter/electric combination. To avoid that overlap,
-    # any generic EV row that isn't scooter-specific is scoped to Bike.
+    # EV power bands. Vehicle Type = ALL for any generic (non-scooter-
+    # specific) EV power band. CORRECTED: a prior revision scoped these to
+    # "Bike" on the theory that the plain "SCOOTER" segment (VehicleType=
+    # Scooter, Fuel=ALL) already covers electric scooters and would
+    # double-count against an ALL+Electric row. QA review of the reference
+    # output confirmed that reasoning was wrong for these rows — they must
+    # be VehicleType=ALL. Only the explicitly scooter-scoped "SCOOTER/EV"
+    # segment stays Scooter.
+    #
+    # Also fixed: "> 3 KW" and "> 7 KW" are NOT the same band. "< 3 KW"/
+    # "< 7 KW" both represent the low band (0.10-2.90) regardless of
+    # label, but the high-side label tells you whether this cluster's
+    # split is at 3KW or 7KW, so ">3 KW" must map to 3.10-100.00 while
+    # ">7 KW" maps to 7.10-100.00. The old code collapsed both into
+    # 3.10-100.00, which produced a wrong/overlapping power range whenever
+    # a cluster used the 7KW split together with an explicit "3-7 KW" mid
+    # band (e.g. NE_OR_Good).
+    #
+    # Also removed: the old "3-7 KW" branch used to also synthesize
+    # compensating 0%-payin rows for the bands below 3KW and above 7KW.
+    # That's wrong whenever this cluster/make already has its own real
+    # "< 3 KW"/"< 7 KW" and "> 3 KW"/"> 7 KW" entries (as NE_OR_Good
+    # does) — it created duplicate, overlapping rows that stomped the real
+    # rate with a bogus 0%. The mid band now only ever comes from its own
+    # explicit "3-7 KW" entry; low/high bands come from their own entries
+    # when present.
     if s_norm in ("< 3 KW", "< 7 KW"):
-        add("Bike", FUEL_EV, pwf=0.10, pwt=2.90)
-    elif s_norm in (">3 KW", "> 3 KW", ">7 KW", "> 7 KW"):
-        add("Bike", FUEL_EV, pwf=3.10, pwt=100.00)
+        add("ALL", FUEL_EV, pwf=0.10, pwt=2.90)
+    elif s_norm in (">3 KW", "> 3 KW"):
+        add("ALL", FUEL_EV, pwf=3.10, pwt=100.00)
+    elif s_norm in (">7 KW", "> 7 KW"):
+        add("ALL", FUEL_EV, pwf=7.10, pwt=100.00)
     elif s_norm == "3-7 KW":
-        add("Bike", FUEL_EV, pwf=3.00, pwt=7.00)
-        add("Bike", FUEL_EV, pwf=0.10, pwt=2.90, use_pp=False)
-        add("Bike", FUEL_EV, pwf=7.10, pwt=100.00, use_pp=False)
+        add("ALL", FUEL_EV, pwf=3.00, pwt=7.00)
     elif s_norm == "EV":
-        add("Bike", FUEL_EV)
+        add("ALL", FUEL_EV)
     elif s_norm == "SCOOTER/EV":
         add("Scooter", FUEL_EV)
     # Bike CC bands
@@ -417,7 +458,10 @@ def seg_rows_1p5(make_raw, seg, cd2, rule_pfx, state, rto, counter, eff_s, eff_e
 def veh_info_1p1(seg):
     s = str(seg).strip()
     if s == "SC/EV":
-        return ("Scooter", FUEL_PETROL, None, None)
+        # "SC/EV" = scooter, any fuel (covers both petrol and electric
+        # scooters). CORRECTED: was scoped to Petrol-only, which silently
+        # excluded electric scooters from this rule.
+        return ("Scooter", FUEL_ALL, None, None)
     if s in ("MC <= 180 Hero/Honda", "MC <= 180 Hero/Honda/TVS", "MC <= 180 Others"):
         return ("Bike", FUEL_PETROL, 1, 180)
     if s in ("MC_180-350_RE", "MC_180-350_HONDA/JAWA/Avenger",
@@ -446,12 +490,16 @@ def make_field_1p1(seg):
         # models.
         return "HONDA, JAWA MOTORCYCLE, BAJAJ", "BAJAJ|AVENGER"
     if s in ("MC_180-350_Other than RE", "MC_180-350_Others"):
-        # "Other than RE" is the broad catch-all for this CC band: it should
-        # exclude only Royal Enfield (which has its own dedicated row above)
-        # and apply to ALL models, not be narrowed to the Avenger model.
-        # The HONDA/JAWA/Avenger row is a separate, more specific carve-out
-        # that coexists with (and takes precedence over) this broader rule.
-        return "EXCLUDE: ROYAL ENFIELD", "ALL"
+        # "Other than RE" is the broad catch-all for this CC band. It must
+        # exclude ROYAL ENFIELD, HONDA, and JAWA MOTORCYCLE — all three
+        # have their own dedicated rows above (RE gets its own row; HONDA/
+        # JAWA/BAJAJ|Avenger gets its own row) — and, for the makes it does
+        # cover (chiefly BAJAJ), it must exclude the BAJAJ|AVENGER model
+        # specifically, since that model is already covered by the
+        # HONDA/JAWA/Avenger row. CORRECTED: a prior revision excluded only
+        # Royal Enfield and left Model=ALL, which double-covered
+        # HONDA/JAWA/Avenger with conflicting rates.
+        return "EXCLUDE: ROYAL ENFIELD, HONDA, JAWA MOTORCYCLE", "EXCLUDE: BAJAJ|AVENGER"
     if s == "MC>350":
         return "ALL", "ALL"
     return "ALL", "ALL"
@@ -524,7 +572,7 @@ def gen_1p5(d, eff_s, eff_e, counter, state_filter=None):
             name = f"{pfx}_new_com_{counter}_TW"
             rows.append(build_row(name, state, rto_f,
                                   "Comprehensive", "new", "ALL",
-                                  "Bike", FUEL_EV, "BAJAJ", "ALL",
+                                  "ALL", FUEL_EV, "BAJAJ", "ALL",
                                   None, None,
                                   fmt_power(3.00), fmt_power(7.00),
                                   pt, pp, eff_s, eff_e))
