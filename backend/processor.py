@@ -47,6 +47,26 @@ Key fixes:
     ENFIELD, HONDA, and JAWA MOTORCYCLE (not just RE), and its Model is
     "EXCLUDE: BAJAJ|AVENGER" (not ALL), since HONDA/JAWA/BAJAJ|Avenger are
     already covered by the dedicated MC_180-350_HONDA/JAWA/Avenger row.
+
+  v7 fixes (QA review against ODISHA_2W_Updated.xlsx reference output):
+  - TW 1+5 EV power bands are now reordered per-make into canonical
+    low -> mid -> high order before being emitted, regardless of the row
+    order in the source sheet. NE_OR_Good/"Others" lists its three real
+    bands as "< 3 KW", ">7 KW", "3-7 KW" (low, high, mid) but the
+    reference output emits them low, mid, high. Non-band segments (MC,
+    SCOOTER, ...) are unaffected and keep their original relative order.
+  - Removed the "Gap (a)" synthesis that fabricated a "3-7 KW" mid-band
+    row (at the low-band's rate) whenever a make had explicit low + high
+    entries but no explicit mid entry (e.g. OR_Bad/ROM+RJ+GJ+UP+UK+OR REF's
+    "Others" band, which only ever provides "< 3 KW"/"> 3 KW"). The
+    reference output has no such row for these clusters — when the source
+    genuinely has no mid entry, none should be generated.
+  - When a make has all three EV bands (low, mid, AND high) as real,
+    explicit source entries — not gap-synthesized — the high band's POSP
+    is now zeroed (PayIn is left as-is). Confirmed against NE_OR_Good/
+    "Others" (the only cluster in this dataset with a genuine 3-band
+    explicit split): its ">7 KW" row keeps PayIn=32.5% but POSP=0, unlike
+    every gap-synthesized or 2-band case where POSP = PayIn * 0.8.
 """
 
 import os
@@ -526,6 +546,49 @@ def veh_info_saod(seg):
 
 # ── Generators ────────────────────────────────────────────────
 
+def _band_priority(seg):
+    """Canonical EV power-band order: low < mid < high. Returns None for
+    non-band segments (MC, SCOOTER, etc.)."""
+    s = _norm_seg(seg)
+    if s in ("< 3 KW", "< 7 KW"):
+        return 0
+    if s == "3-7 KW":
+        return 1
+    if s in (">3 KW", "> 3 KW", ">7 KW", "> 7 KW"):
+        return 2
+    return None
+
+
+def _reorder_ev_bands(entries):
+    """Within each make's contiguous block of entries, emit EV power-band
+    rows (low/mid/high) in canonical order rather than raw sheet order.
+    CONFIRMED against ODISHA reference: source rows for NE_OR_Good/Others
+    are listed as low, high, mid ("< 3 KW", ">7 KW", "3-7 KW") but the
+    reference output emits them low, mid, high. Non-band segments (MC,
+    SCOOTER, ...) keep their original relative order and are placed after
+    the reordered band rows, matching the source layout."""
+    result = []
+    i, n = 0, len(entries)
+    while i < n:
+        make = entries[i]["make"]
+        j = i
+        while j < n and entries[j]["make"] == make:
+            j += 1
+        block = entries[i:j]
+        bands, others = [], []
+        for e in block:
+            bp = _band_priority(e["seg"])
+            if bp is None:
+                others.append(e)
+            else:
+                bands.append((bp, e))
+        bands.sort(key=lambda t: t[0])
+        result.extend(e for _, e in bands)
+        result.extend(others)
+        i = j
+    return result
+
+
 def gen_1p5(d, eff_s, eff_e, counter, state_filter=None):
     rows = []
     clusters = {}
@@ -533,7 +596,7 @@ def gen_1p5(d, eff_s, eff_e, counter, state_filter=None):
         clusters.setdefault(e["cluster"], []).append(e)
 
     for cluster in sorted(clusters):
-        entries = clusters[cluster]
+        entries = _reorder_ev_bands(clusters[cluster])
         rtos = sorted(d["c_1p5"].get(cluster, []))
         if not rtos:
             continue
@@ -578,6 +641,22 @@ def gen_1p5(d, eff_s, eff_e, counter, state_filter=None):
             new_rows, counter = seg_rows_1p5(make_raw, e["seg"], e["cd2"],
                                              pfx, state, rto_f,
                                              counter, eff_s, eff_e)
+
+            # When a make has all three EV bands (low, mid, AND high) given
+            # as real, explicit source entries — not gap-synthesized — the
+            # high band's POSP is zeroed (PayIn is left as-is). CONFIRMED
+            # against the ODISHA reference (NE_OR_Good/"Others", the only
+            # cluster in this dataset with a genuine 3-band explicit split):
+            # its ">7 KW" row keeps PayIn=32.5% but POSP=0, unlike every
+            # gap-synthesized or 2-band case where POSP = PayIn * 0.8.
+            seg_s = _norm_seg(e["seg"])
+            if seg_s in ("> 3 KW", ">3 KW", "> 7 KW", ">7 KW"):
+                is_bajaj = _bajaj_only_brand(make_raw)
+                mk = "BAJAJ" if is_bajaj else normalize_make_1p5(make_raw)
+                grp = ev_groups.get(mk, {})
+                if grp.get("low") is not None and grp.get("mid") is not None:
+                    new_rows[-1][47] = "0"
+
             rows.extend(new_rows)
 
             # Gap (b): right after emitting a mid ("3-7 KW") row, fill in
@@ -607,26 +686,14 @@ def gen_1p5(d, eff_s, eff_e, counter, state_filter=None):
                                           "net", "0", eff_s, eff_e))
                     counter += 1
 
-        # Gap (a): makes with low+high but no mid entry at all.
-        for mk, grp in ev_groups.items():
-            if grp["mid"] is not None or grp["low"] is None or grp["high"] is None:
-                continue
-            # NOTE/assumption: the middle band's PayIn is taken from the
-            # low-band entry's rate, since the source doesn't give a rate
-            # for a combined 3-7 KW row in this case. Check this against
-            # the reference output and adjust if the real rate should
-            # differ for non-Bajaj makes.
-            vt = "ALL" if grp["is_bajaj"] else "Bike"
-            make_final = "BAJAJ" if grp["is_bajaj"] else normalize_make_1p5(grp["low"]["make"])
-            pt, pp = resolve_payin(grp["low"]["cd2"])
-            name = f"{pfx}_new_com_{counter}_TW"
-            rows.append(build_row(name, state, rto_f,
-                                  "Comprehensive", "new", "ALL",
-                                  vt, FUEL_EV, make_final, "ALL",
-                                  None, None,
-                                  fmt_power(3.00), fmt_power(7.00),
-                                  pt, pp, eff_s, eff_e))
-            counter += 1
+        # NOTE: a prior version synthesized a "3-7 KW" mid band (at the
+        # low-band's rate) whenever a make had explicit low + high entries
+        # but no explicit mid entry (e.g. OR_Bad/ROM_REF's "Others" band,
+        # which only ever gives "< 3 KW" and "> 3 KW"). CONFIRMED against
+        # the ODISHA reference output that this synthesis is WRONG: no
+        # such row exists in the reference for these clusters. Removed;
+        # when a make genuinely has no mid entry in the source, none is
+        # generated.
 
     return rows, counter
 
