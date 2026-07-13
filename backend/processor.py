@@ -393,14 +393,14 @@ def seg_rows_1p5(make_raw, seg, cd2, rule_pfx, state, rto, counter, eff_s, eff_e
                               eff_s, eff_e))
         counter += 1
 
-    # EV power bands. Vehicle Type = ALL for any generic (non-scooter-
-    # specific) EV power band. CORRECTED: a prior revision scoped these to
-    # "Bike" on the theory that the plain "SCOOTER" segment (VehicleType=
-    # Scooter, Fuel=ALL) already covers electric scooters and would
-    # double-count against an ALL+Electric row. QA review of the reference
-    # output confirmed that reasoning was wrong for these rows — they must
-    # be VehicleType=ALL. Only the explicitly scooter-scoped "SCOOTER/EV"
-    # segment stays Scooter.
+    # EV power bands. Vehicle Type is ALL specifically for BAJAJ-only EV
+    # power-band rows; every other make (including "Others"/EXCLUDE-brand
+    # rows) stays Bike. CORRECTED (2nd pass): the first fix made ALL EV
+    # power bands VehicleType=ALL regardless of make, but the reference
+    # output shows the "Others" EXCLUDE-brand EV rows (e.g. NE_OR_Good)
+    # are Bike, not ALL — only the BAJAJ EV rows are ALL. Only the
+    # explicitly scooter-scoped "SCOOTER/EV" segment stays Scooter
+    # regardless of make.
     #
     # Also fixed: "> 3 KW" and "> 7 KW" are NOT the same band. "< 3 KW"/
     # "< 7 KW" both represent the low band (0.10-2.90) regardless of
@@ -411,24 +411,28 @@ def seg_rows_1p5(make_raw, seg, cd2, rule_pfx, state, rto, counter, eff_s, eff_e
     # a cluster used the 7KW split together with an explicit "3-7 KW" mid
     # band (e.g. NE_OR_Good).
     #
-    # Also removed: the old "3-7 KW" branch used to also synthesize
-    # compensating 0%-payin rows for the bands below 3KW and above 7KW.
-    # That's wrong whenever this cluster/make already has its own real
-    # "< 3 KW"/"< 7 KW" and "> 3 KW"/"> 7 KW" entries (as NE_OR_Good
-    # does) — it created duplicate, overlapping rows that stomped the real
-    # rate with a bogus 0%. The mid band now only ever comes from its own
-    # explicit "3-7 KW" entry; low/high bands come from their own entries
-    # when present.
+    # Also removed here: the old "3-7 KW" branch used to also synthesize
+    # compensating 0%-payin rows for the bands below 3KW and above 7KW
+    # unconditionally. That's wrong whenever this cluster/make already has
+    # its own real "< 3 KW"/"< 7 KW" and "> 3 KW"/"> 7 KW" entries (as
+    # NE_OR_Good's "Others" make does) — it created duplicate, overlapping
+    # rows that stomped the real rate with a bogus 0%. The mid band here
+    # only ever comes from its own explicit "3-7 KW" entry; low/high bands
+    # come from their own entries when present. Gap-filling for makes that
+    # are genuinely missing a low or high entry (e.g. BAJAJ when only a
+    # mid entry exists) is handled at the cluster level in gen_1p5(), which
+    # has visibility across all of a make's entries in the cluster.
+    ev_vt = "ALL" if _bajaj_only_brand(make_raw) else "Bike"
     if s_norm in ("< 3 KW", "< 7 KW"):
-        add("ALL", FUEL_EV, pwf=0.10, pwt=2.90)
+        add(ev_vt, FUEL_EV, pwf=0.10, pwt=2.90)
     elif s_norm in (">3 KW", "> 3 KW"):
-        add("ALL", FUEL_EV, pwf=3.10, pwt=100.00)
+        add(ev_vt, FUEL_EV, pwf=3.10, pwt=100.00)
     elif s_norm in (">7 KW", "> 7 KW"):
-        add("ALL", FUEL_EV, pwf=7.10, pwt=100.00)
+        add(ev_vt, FUEL_EV, pwf=7.10, pwt=100.00)
     elif s_norm == "3-7 KW":
-        add("ALL", FUEL_EV, pwf=3.00, pwt=7.00)
+        add(ev_vt, FUEL_EV, pwf=3.00, pwt=7.00)
     elif s_norm == "EV":
-        add("ALL", FUEL_EV)
+        add(ev_vt, FUEL_EV)
     elif s_norm == "SCOOTER/EV":
         add("Scooter", FUEL_EV)
     # Bike CC bands
@@ -539,22 +543,35 @@ def gen_1p5(d, eff_s, eff_e, counter, state_filter=None):
         rto_f = _rto_field(rtos)
         pfx = _abbr(cluster)
 
-        # Detect Bajaj EV low/high segments provided as two separate source
-        # rows (e.g. NE_OR_GOOD) rather than a single combined "3-7 KW" row.
-        # In that case the middle 3.00–7.00 KW band never gets generated, so
-        # track it here to add it after the normal per-entry pass.
-        bajaj_low = None
-        bajaj_high = None
-        bajaj_mid_present = False
+        # EV power-band gap filling, per make within this cluster. Two
+        # distinct gaps can occur in the source data:
+        #   (a) low ("< 3 KW"/"< 7 KW") and high ("> 3 KW"/"> 7 KW") exist
+        #       as separate rows but no combined "3-7 KW" mid row is given
+        #       — synthesize the mid band using the low band's rate.
+        #   (b) a "3-7 KW" mid row exists but no separate low and/or high
+        #       row exists for that make — synthesize the missing side(s)
+        #       at 0% payin (confirmed against reference output for BAJAJ).
+        # This used to be hardcoded to BAJAJ only; generalized here since
+        # the same gap shapes can occur for any make. A make's entries are
+        # grouped by its *output* make text (BAJAJ forced for Bajaj-only
+        # cells; normalize_make_1p5() otherwise) so that source-formatting
+        # differences like "Bajaj/Others" vs "Bajaj" still group together.
+        ev_groups = {}
         for e in entries:
-            if _bajaj_only_brand(e["make"]):
-                seg_s = _norm_seg(e["seg"])
-                if seg_s in ("< 3 KW", "< 7 KW"):
-                    bajaj_low = e
-                elif seg_s in (">3 KW", "> 3 KW", ">7 KW", "> 7 KW"):
-                    bajaj_high = e
-                elif seg_s == "3-7 KW":
-                    bajaj_mid_present = True
+            seg_s = _norm_seg(e["seg"])
+            if seg_s not in ("< 3 KW", "< 7 KW", "3-7 KW",
+                              ">3 KW", "> 3 KW", ">7 KW", "> 7 KW"):
+                continue
+            is_bajaj = _bajaj_only_brand(e["make"])
+            mk = "BAJAJ" if is_bajaj else normalize_make_1p5(e["make"])
+            grp = ev_groups.setdefault(mk, {"low": None, "mid": None,
+                                             "high": None, "is_bajaj": is_bajaj})
+            if seg_s in ("< 3 KW", "< 7 KW"):
+                grp["low"] = e
+            elif seg_s == "3-7 KW":
+                grp["mid"] = e
+            else:
+                grp["high"] = e
 
         for e in entries:
             make_raw = e["make"]
@@ -563,16 +580,49 @@ def gen_1p5(d, eff_s, eff_e, counter, state_filter=None):
                                              counter, eff_s, eff_e)
             rows.extend(new_rows)
 
-        if bajaj_low and bajaj_high and not bajaj_mid_present:
+            # Gap (b): right after emitting a mid ("3-7 KW") row, fill in
+            # any missing low/high sides for that make at 0% payin.
+            if _norm_seg(e["seg"]) == "3-7 KW":
+                is_bajaj = _bajaj_only_brand(make_raw)
+                mk = "BAJAJ" if is_bajaj else normalize_make_1p5(make_raw)
+                grp = ev_groups.get(mk, {})
+                vt = "ALL" if is_bajaj else "Bike"
+                make_final = "BAJAJ" if is_bajaj else normalize_make_1p5(make_raw)
+                if grp.get("low") is None:
+                    name = f"{pfx}_new_com_{counter}_TW"
+                    rows.append(build_row(name, state, rto_f,
+                                          "Comprehensive", "new", "ALL",
+                                          vt, FUEL_EV, make_final, "ALL",
+                                          None, None,
+                                          fmt_power(0.10), fmt_power(2.90),
+                                          "net", "0", eff_s, eff_e))
+                    counter += 1
+                if grp.get("high") is None:
+                    name = f"{pfx}_new_com_{counter}_TW"
+                    rows.append(build_row(name, state, rto_f,
+                                          "Comprehensive", "new", "ALL",
+                                          vt, FUEL_EV, make_final, "ALL",
+                                          None, None,
+                                          fmt_power(7.10), fmt_power(100.00),
+                                          "net", "0", eff_s, eff_e))
+                    counter += 1
+
+        # Gap (a): makes with low+high but no mid entry at all.
+        for mk, grp in ev_groups.items():
+            if grp["mid"] is not None or grp["low"] is None or grp["high"] is None:
+                continue
             # NOTE/assumption: the middle band's PayIn is taken from the
             # low-band entry's rate, since the source doesn't give a rate
-            # for a combined 3-7 KW row in this case. Check this against the
-            # reference output and adjust if the real rate should differ.
-            pt, pp = resolve_payin(bajaj_low["cd2"])
+            # for a combined 3-7 KW row in this case. Check this against
+            # the reference output and adjust if the real rate should
+            # differ for non-Bajaj makes.
+            vt = "ALL" if grp["is_bajaj"] else "Bike"
+            make_final = "BAJAJ" if grp["is_bajaj"] else normalize_make_1p5(grp["low"]["make"])
+            pt, pp = resolve_payin(grp["low"]["cd2"])
             name = f"{pfx}_new_com_{counter}_TW"
             rows.append(build_row(name, state, rto_f,
                                   "Comprehensive", "new", "ALL",
-                                  "ALL", FUEL_EV, "BAJAJ", "ALL",
+                                  vt, FUEL_EV, make_final, "ALL",
                                   None, None,
                                   fmt_power(3.00), fmt_power(7.00),
                                   pt, pp, eff_s, eff_e))
@@ -613,7 +663,12 @@ def gen_1p1(d, eff_s, eff_e, counter, state_filter=None):
                 has_ev = True
                 ev_cd2_rr = e["cd2_1p1"]
                 ev_cd2_tp = e["cd2_satp"]
-                fuel = FUEL_PETROL
+                # NOTE: removed a stale "fuel = FUEL_PETROL" override here.
+                # veh_info_1p1() already returns FUEL_ALL for "SC/EV" (fixed
+                # earlier), but this line was clobbering it back to
+                # Petrol-only, silently undoing that fix for the main SC/EV
+                # row. The dedicated Bike+Electric bonus row below (using
+                # the same cd2_1p1/cd2_satp rate) is unaffected either way.
 
             pt1, pp1 = resolve_payin(e["cd2_1p1"])
             pts, pps = resolve_payin(e["cd2_satp"])
