@@ -812,11 +812,11 @@ def gen_saod(d, eff_s, eff_e, counter, state_filter=None):
 
 # ── Output writer ─────────────────────────────────────────────
 
-def write_output_excel(rows, path):
+def write_output_excel(rows, path, headers=None):
     wb = Workbook()
     ws = wb.active
     ws.title = "Sheet1"
-    ws.append(OUTPUT_HEADERS)
+    ws.append(headers if headers is not None else OUTPUT_HEADERS)
     hfill = PatternFill("solid", fgColor="366092")
     hfont = Font(bold=True, color="FFFFFF")
     for cell in ws[1]:
@@ -893,6 +893,193 @@ def process_all(input_path, output_dir, eff_s, eff_e,
     if progress_callback:
         progress_callback("Complete!", len(targets), len(targets))
     return generated
+
+# ════════════════════════════════════════════════════════════════
+# TATA AIG 2W  —  separate LC, separate schema (no POSP columns)
+# ════════════════════════════════════════════════════════════════
+#
+# Source: "TW" sheet of the TATA Standard Grid Communication workbook
+#   (Segment, Bzi type, Type, then one rate column per cluster).
+# Cluster -> RTO/State resolution comes from a fixed reference table
+#   (RTO-TW Mapper), shipped alongside this file as tata_rto_map.json
+#   and embedded at import time, since that mapping is stable master
+#   data rather than something re-uploaded on every run. Built from
+#   TATA_RTO_Master.xlsx / "RTO-TW Mapper" sheet, deduped on
+#   TXT_RTO_CODE (many rows were exact duplicates).
+#
+# Column values follow the actual TATA_AIG/TW rows in the reference
+# sample file (Tata-2w-rule-sample-FIle.xlsx) wherever the sample and
+# the prose spec disagreed — e.g. Business Type is the shortened
+# "New"/"Renew"/"Rollover" (not "Brand New"/"Renewal"), Payin Reward
+# Type is lowercase "percentage", and Payin OD/TP Amount are "0"
+# rather than blank.
+
+import json as _json
+
+TATA_OUTPUT_HEADERS = OUTPUT_HEADERS[:45]  # same schema minus the 5 POSP columns
+
+TATA_COVER_TYPE_MAP = {
+    "PACKAGE": "Comprehensive",
+    "SATP": "TP",
+    "SAOD": "SAOD",
+    "ALL": "All",   # judgment call: source "Type"="All" (Brand New Moped/Scooter
+                     # rows only) has no Package/SATP/SAOD split to map from, so
+                     # it's passed through literally rather than invented.
+}
+
+TATA_BUSINESS_TYPE_MAP = {
+    "BRAND NEW": "New",
+    "RENEWAL": "Renew",
+    "ROLLOVER": "Rollover",
+}
+
+_TATA_RTO_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tata_rto_map.json")
+_tata_rto_map_cache = None
+
+def _load_tata_rto_map():
+    global _tata_rto_map_cache
+    if _tata_rto_map_cache is None:
+        with open(_TATA_RTO_MAP_PATH, "r") as f:
+            _tata_rto_map_cache = _json.load(f)
+    return _tata_rto_map_cache
+
+def _tata_slug(text, maxlen=18):
+    s = "".join(ch if ch.isalnum() else "_" for ch in str(text).strip())
+    while "__" in s:
+        s = s.replace("__", "_")
+    return s.strip("_")[:maxlen].strip("_").upper()
+
+def load_tata_input_data(path):
+    """Load the TW sheet of the TATA Standard Grid Communication workbook."""
+    wb = load_workbook(path, read_only=True, data_only=True)
+    ws = wb["TW"]
+    rows = list(ws.iter_rows(values_only=True))
+    header = rows[4]
+    cluster_cols = [(i, str(v).strip()) for i, v in enumerate(header)
+                    if 4 <= i <= 73 and v is not None]
+
+    entries = []
+    for r in rows[5:]:
+        segment, bzi, typ = r[1], r[2], r[3]
+        if segment is None or bzi is None or typ is None:
+            continue
+        if str(bzi).strip() not in ("Brand New", "Renewal", "Rollover"):
+            continue  # stray non-data row (the sheet has one trailing row of
+                      # bare integers below the real 22 data rows)
+        for i, cluster_name in cluster_cols:
+            rate = r[i] if i < len(r) else None
+            entries.append({
+                "segment": str(segment).strip(),
+                "bzi": str(bzi).strip(),
+                "type": str(typ).strip(),
+                "cluster": cluster_name,
+                "cluster_key": cluster_name.strip().upper(),
+                "rate": rate,
+            })
+    wb.close()
+    return entries
+
+def get_all_tata_states():
+    rto_map = _load_tata_rto_map()
+    states = set()
+    for v in rto_map.values():
+        states.update(v["states"])
+    return sorted(states)
+
+def build_row_tata(rule_name, cover_type, biz_type, state, rto,
+                    vtype, eff_start, eff_end, payin_pct):
+    return [
+        None, rule_name, "TATA_AIG", "TW", None,
+        "PAYINPAYOUT", cover_type, biz_type, "All", state, rto,
+        None, vtype, "All", "All", "All",
+        "All", None, "any", "na", None, "na", None,
+        None, None, None, None, None, None, None, None,
+        "na", None, None, None, None, None, None,
+        eff_start, eff_end,
+        "net", "percentage", payin_pct, "0", "0",
+    ]
+
+def generate_for_state_tata(entries, state_name, eff_s, eff_e, counter_start=1):
+    rto_map = _load_tata_rto_map()
+    rows = []
+    counter = counter_start
+
+    # Group entries by cluster so each cluster's RTO/state resolution
+    # (and rule-name prefix) is only computed once.
+    by_cluster = {}
+    for e in entries:
+        by_cluster.setdefault(e["cluster_key"], []).append(e)
+
+    for cluster_key in sorted(by_cluster):
+        cluster_info = rto_map.get(cluster_key)
+        if not cluster_info or not cluster_info["rtos"]:
+            continue  # e.g. "Andaman" — in the TW sheet but not in the RTO mapper
+        if state_name not in cluster_info["states"]:
+            continue
+
+        state_field = ", ".join(cluster_info["states"])
+        rto_field = ", ".join(cluster_info["rtos"])
+        primary_state_slug = _tata_slug(cluster_info["states"][0])
+        cluster_slug = _tata_slug(by_cluster[cluster_key][0]["cluster"])
+
+        for e in by_cluster[cluster_key]:
+            cover_type = TATA_COVER_TYPE_MAP.get(e["type"].strip().upper(), e["type"])
+            biz_type = TATA_BUSINESS_TYPE_MAP.get(e["bzi"].strip().upper(), e["bzi"])
+            vtype = e["segment"]
+            payin_pct = _pct(e["rate"])
+
+            rule_name = (f"TATA_{primary_state_slug}_{cluster_slug}_"
+                         f"{_tata_slug(vtype, 6)}_{_tata_slug(biz_type, 6)}_"
+                         f"{counter}_TW")
+            rows.append(build_row_tata(rule_name, cover_type, biz_type,
+                                        state_field, rto_field, vtype,
+                                        eff_s, eff_e, payin_pct))
+            counter += 1
+
+    return rows, counter
+
+def process_all_tata(input_path, output_dir, eff_s, eff_e,
+                      states=None, progress_callback=None,
+                      output_mode="per_state", combined_filename=None):
+    os.makedirs(output_dir, exist_ok=True)
+    if progress_callback:
+        progress_callback("Loading TATA TW source data...", 0, 1)
+    entries = load_tata_input_data(input_path)
+    all_states = get_all_tata_states()
+    targets = [s for s in all_states if (states is None or s in states)]
+
+    want_per_state = output_mode in ("per_state", "both")
+    want_combined = output_mode in ("combined", "both")
+
+    generated = []
+    combined_rows = []
+    counter = 1
+    for idx, state in enumerate(targets):
+        if progress_callback:
+            progress_callback(f"Processing {state}...", idx, len(targets))
+        rows, counter = generate_for_state_tata(entries, state, eff_s, eff_e, counter)
+        if not rows:
+            continue
+        if want_per_state:
+            fname = state.replace(", ", "_").replace(" ", "").replace(",", "_").replace("&", "and") + "_TATA_2W.xlsx"
+            out = os.path.join(output_dir, fname)
+            write_output_excel(rows, out, headers=TATA_OUTPUT_HEADERS)
+            generated.append(out)
+        if want_combined:
+            combined_rows.extend(rows)
+
+    if want_combined and combined_rows:
+        fname = combined_filename or "Combined_States_TATA_2W.xlsx"
+        if not fname.lower().endswith(".xlsx"):
+            fname += ".xlsx"
+        out = os.path.join(output_dir, fname)
+        write_output_excel(combined_rows, out, headers=TATA_OUTPUT_HEADERS)
+        generated.append(out)
+
+    if progress_callback:
+        progress_callback("Complete!", len(targets), len(targets))
+    return generated
+
 
 if __name__ == "__main__":
     import time

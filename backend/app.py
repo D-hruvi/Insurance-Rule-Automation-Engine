@@ -16,6 +16,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from processor import load_input_data, get_all_states, process_all, generate_for_state, write_output_excel
+from processor import get_all_tata_states, process_all_tata
 
 app = Flask(__name__)
 CORS(app)
@@ -42,13 +43,25 @@ def get_states():
     if not f.filename.endswith(".xlsx"):
         return jsonify({"error": "Only .xlsx files are supported"}), 400
 
+    lc = request.form.get("lc", "digit")
+
     session_id = str(uuid.uuid4())[:8]
     save_path = os.path.join(UPLOAD_DIR, f"{session_id}_{f.filename}")
     f.save(save_path)
 
     try:
-        d = load_input_data(save_path)
-        states = get_all_states(d)
+        if lc == "tata":
+            # States come from the fixed RTO-TW Mapper master table, not the
+            # uploaded grid — just confirm the sheet the parser needs exists.
+            from openpyxl import load_workbook as _lw
+            wb = _lw(save_path, read_only=True)
+            if "TW" not in wb.sheetnames:
+                return jsonify({"error": "Uploaded file has no 'TW' sheet"}), 400
+            wb.close()
+            states = get_all_tata_states()
+        else:
+            d = load_input_data(save_path)
+            states = get_all_states(d)
         return jsonify({
             "session_id": session_id,
             "file_path": save_path,
@@ -90,6 +103,8 @@ def process():
         return jsonify({"error": "output_mode must be one of: per_state, combined, both"}), 400
     combined_filename = request.form.get("combined_filename") or None
 
+    lc = request.form.get("lc", "digit")
+
     session_id = str(uuid.uuid4())[:8]
     save_path = os.path.join(UPLOAD_DIR, f"{session_id}_{f.filename}")
     f.save(save_path)
@@ -103,7 +118,8 @@ def process():
         progress_log.append({"message": msg, "current": current, "total": total})
 
     try:
-        generated = process_all(
+        process_fn = process_all_tata if lc == "tata" else process_all
+        generated = process_fn(
             save_path, out_dir,
             effect_start, effect_end,
             states=states,
@@ -113,7 +129,8 @@ def process():
         )
 
         # Create a zip of all output files
-        zip_path = os.path.join(out_dir, f"Digit_2W_{session_id}.zip")
+        zip_prefix = "TATA_2W" if lc == "tata" else "Digit_2W"
+        zip_path = os.path.join(out_dir, f"{zip_prefix}_{session_id}.zip")
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for fp in generated:
                 zf.write(fp, os.path.basename(fp))

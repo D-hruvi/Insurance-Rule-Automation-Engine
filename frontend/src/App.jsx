@@ -422,7 +422,13 @@ function ResultManifest({ files, zipFile, sessionId }) {
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 
+const LC_OPTIONS = [
+  { id: "digit", label: "DIGIT", sheetHint: "2W RTO's, TW 1+5, TW 1+1 & SATP, TW SAOD…" },
+  { id: "tata", label: "TATA AIG", sheetHint: "TW sheet of the Standard Grid Communication workbook" },
+];
+
 export default function App() {
+  const [lc, setLc] = useState("digit"); // digit | tata
   const [file, setFile] = useState(null);
   const [effStart, setEffStart] = useState(today());
   const [effEnd, setEffEnd] = useState(lastDayOf(today()));
@@ -452,6 +458,7 @@ export default function App() {
     try {
       const fd = new FormData();
       fd.append("file", f);
+      fd.append("lc", lc);
       const res = await fetch(`${API}/api/states`, { method: "POST", body: fd });
       const data = await res.json();
       if (data.states) {
@@ -462,7 +469,18 @@ export default function App() {
     } finally {
       setStatesLoading(false);
     }
-  }, []);
+  }, [lc]);
+
+  const handleLcChange = (nextLc) => {
+    if (nextLc === lc || processing) return;
+    setLc(nextLc);
+    setFile(null);
+    setAvailableStates([]);
+    setSelectedStates([]);
+    setResult(null);
+    setError(null);
+    setStatus("idle");
+  };
 
   const handleStartDate = (v) => {
     setEffStart(v);
@@ -480,6 +498,7 @@ export default function App() {
 
     const fd = new FormData();
     fd.append("file", file);
+    fd.append("lc", lc);
     fd.append("effect_start", effStart);
     fd.append("effect_end", effEnd);
     if (selectedStates.length > 0)
@@ -570,7 +589,7 @@ export default function App() {
                 fontSize: 10.5, color: "#C9A227", fontFamily: "'IBM Plex Mono', monospace",
                 letterSpacing: "0.14em", marginBottom: 9, fontWeight: 600,
               }}>
-                DIGIT TWO-WHEELER · INSURANCE OPERATIONS
+                {lc === "tata" ? "TATA AIG" : "DIGIT"} TWO-WHEELER · INSURANCE OPERATIONS
               </div>
               <h1 style={{
                 fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 34,
@@ -592,7 +611,7 @@ export default function App() {
             animationDelay: "0.1s",
           }}>
             <StatBlock label="States covered" value={String(stateCount)} />
-            <StatBlock label="Output columns" value="50" />
+            <StatBlock label="Output columns" value={lc === "tata" ? "45" : "50"} />
             <StatBlock label="Status" value={processing ? "RUNNING" : status === "success" ? "DONE" : status === "error" ? "FAILED" : "STANDBY"}
               tone={processing ? "#C9A227" : status === "success" ? "#4A8772" : status === "error" ? "#A14B4B" : "#6B7178"} />
           </div>
@@ -606,6 +625,37 @@ export default function App() {
       }}>
         {/* LEFT spine */}
         <div style={{ borderRight: "1px solid #363C46", paddingRight: 32 }}>
+
+          <Step n="00" label="Insurer (LC)" delay="0s">
+            <div style={{ display: "flex", gap: 8 }}>
+              {LC_OPTIONS.map(opt => {
+                const active = lc === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    onClick={() => handleLcChange(opt.id)}
+                    disabled={processing}
+                    style={{
+                      flex: 1, padding: "11px 0", borderRadius: 3,
+                      fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600,
+                      fontSize: 12, letterSpacing: "0.04em", cursor: processing ? "not-allowed" : "pointer",
+                      background: active ? "linear-gradient(180deg, #D9B546, #C9A227)" : "#22262D",
+                      color: active ? "#22262D" : "#8B9096",
+                      border: active ? "1px solid #E0BB4A" : "1px solid #363C46",
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{
+              color: "#454A51", fontSize: 11, marginTop: 9, lineHeight: 1.5,
+              fontFamily: "'IBM Plex Mono', monospace",
+            }}>
+              Expects: {LC_OPTIONS.find(o => o.id === lc)?.sheetHint}
+            </div>
+          </Step>
 
           <Step n="01" label="Source file" delay="0.05s">
             <UploadZone file={file} onFile={handleFile} disabled={processing} />
@@ -740,8 +790,8 @@ export default function App() {
         fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: "#4A5159",
         letterSpacing: "0.04em",
       }}>
-        <span>DIGIT 2W RULE ENGINE</span>
-        <span>50-COLUMN STATE GRID OUTPUT</span>
+        <span>{lc === "tata" ? "TATA AIG" : "DIGIT"} 2W RULE ENGINE</span>
+        <span>{lc === "tata" ? "45" : "50"}-COLUMN STATE GRID OUTPUT</span>
       </div>
     </div>
   );
