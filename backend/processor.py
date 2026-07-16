@@ -900,12 +900,18 @@ def process_all(input_path, output_dir, eff_s, eff_e,
 #
 # Source: "TW" sheet of the TATA Standard Grid Communication workbook
 #   (Segment, Bzi type, Type, then one rate column per cluster).
-# Cluster -> RTO/State resolution comes from a fixed reference table
-#   (RTO-TW Mapper), shipped alongside this file as tata_rto_map.json
-#   and embedded at import time, since that mapping is stable master
-#   data rather than something re-uploaded on every run. Built from
-#   TATA_RTO_Master.xlsx / "RTO-TW Mapper" sheet, deduped on
-#   TXT_RTO_CODE (many rows were exact duplicates).
+# Cluster -> RTO/State resolution comes from the "RTO-TW Mapper" sheet
+#   of the TATA_RTO_Master.xlsx workbook. This is re-uploaded by the
+#   user each month (not bundled with the code) since RTO-to-cluster
+#   assignments change over time. build_tata_rto_map() builds the
+#   cluster -> {rtos, states} map fresh from that upload every run.
+#
+#   Dedup rule (found by diffing against the old bundled map): the
+#   sheet lists many RTO codes twice — once as e.g. "WB43" and once as
+#   "WB-43" — same code, not distinct RTOs. Dedup normalizes by
+#   stripping hyphens/spaces before comparing, keeping the first
+#   occurrence. An exact-string dedup on TXT_RTO_CODE misses this and
+#   roughly doubles every cluster's RTO list.
 #
 # Column values follow the actual TATA_AIG/TW rows in the reference
 # sample file (Tata-2w-rule-sample-FIle.xlsx) wherever the sample and
@@ -913,8 +919,6 @@ def process_all(input_path, output_dir, eff_s, eff_e,
 # "New"/"Renew"/"Rollover" (not "Brand New"/"Renewal"), Payin Reward
 # Type is lowercase "percentage", and Payin OD/TP Amount are "0"
 # rather than blank.
-
-import json as _json
 
 TATA_OUTPUT_HEADERS = OUTPUT_HEADERS[:45]  # same schema minus the 5 POSP columns
 
@@ -933,15 +937,58 @@ TATA_BUSINESS_TYPE_MAP = {
     "ROLLOVER": "Rollover",
 }
 
-_TATA_RTO_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tata_rto_map.json")
-_tata_rto_map_cache = None
+def build_tata_rto_map(master_path):
+    """
+    Build the cluster -> {rtos, states} map from the "RTO-TW Mapper"
+    sheet of a freshly-uploaded TATA_RTO_Master.xlsx. Re-run every
+    request — this is monthly master data, not something cached
+    across runs.
 
-def _load_tata_rto_map():
-    global _tata_rto_map_cache
-    if _tata_rto_map_cache is None:
-        with open(_TATA_RTO_MAP_PATH, "r") as f:
-            _tata_rto_map_cache = _json.load(f)
-    return _tata_rto_map_cache
+    Dedup: TXT_RTO_CODE values appear twice per RTO in the sheet, once
+    hyphenated ("WB-43") and once not ("WB43"). Both refer to the same
+    RTO, so codes are normalized (hyphens/spaces stripped, uppercased)
+    before dedup, keeping the first occurrence's normalized form.
+    """
+    wb = load_workbook(master_path, read_only=True, data_only=True)
+    if "RTO-TW Mapper" not in wb.sheetnames:
+        wb.close()
+        raise ValueError("RTO master file has no 'RTO-TW Mapper' sheet")
+    ws = wb["RTO-TW Mapper"]
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+
+    header_idx = None
+    for i, r in enumerate(rows[:5]):
+        if r and any(c is not None and str(c).strip().upper() == "TXT_RTO_CODE" for c in r):
+            header_idx = i
+            break
+    if header_idx is None:
+        raise ValueError("Could not find a TXT_RTO_CODE header in 'RTO-TW Mapper' sheet")
+
+    seen_codes = set()
+    clusters = {}
+    for r in rows[header_idx + 1:]:
+        if not r or r[0] is None:
+            continue
+        raw_code = str(r[0]).strip()
+        code = raw_code.replace("-", "").replace(" ", "").upper()
+        if not code or code in seen_codes:
+            continue
+        seen_codes.add(code)
+
+        state = r[2] if len(r) > 2 else None
+        cluster = r[3] if len(r) > 3 else None
+        if state is None or cluster is None:
+            continue
+        cluster_key = str(cluster).strip().upper()
+        entry = clusters.setdefault(cluster_key, {"rtos": set(), "states": set()})
+        entry["rtos"].add(code)
+        entry["states"].add(str(state).strip())
+
+    return {
+        k: {"rtos": sorted(v["rtos"]), "states": sorted(v["states"])}
+        for k, v in clusters.items()
+    }
 
 def _tata_slug(text, maxlen=18):
     s = "".join(ch if ch.isalnum() else "_" for ch in str(text).strip())
@@ -979,8 +1026,7 @@ def load_tata_input_data(path):
     wb.close()
     return entries
 
-def get_all_tata_states():
-    rto_map = _load_tata_rto_map()
+def get_all_tata_states(rto_map):
     states = set()
     for v in rto_map.values():
         states.update(v["states"])
@@ -999,8 +1045,7 @@ def build_row_tata(rule_name, cover_type, biz_type, state, rto,
         "net", "percentage", payin_pct, "0", "0",
     ]
 
-def generate_for_state_tata(entries, state_name, eff_s, eff_e, counter_start=1):
-    rto_map = _load_tata_rto_map()
+def generate_for_state_tata(entries, state_name, eff_s, eff_e, rto_map, counter_start=1):
     rows = []
     counter = counter_start
 
@@ -1038,14 +1083,17 @@ def generate_for_state_tata(entries, state_name, eff_s, eff_e, counter_start=1):
 
     return rows, counter
 
-def process_all_tata(input_path, output_dir, eff_s, eff_e,
+def process_all_tata(input_path, output_dir, eff_s, eff_e, rto_master_path,
                       states=None, progress_callback=None,
                       output_mode="per_state", combined_filename=None):
     os.makedirs(output_dir, exist_ok=True)
     if progress_callback:
         progress_callback("Loading TATA TW source data...", 0, 1)
     entries = load_tata_input_data(input_path)
-    all_states = get_all_tata_states()
+    if progress_callback:
+        progress_callback("Loading TATA RTO master data...", 0, 1)
+    rto_map = build_tata_rto_map(rto_master_path)
+    all_states = get_all_tata_states(rto_map)
     targets = [s for s in all_states if (states is None or s in states)]
 
     want_per_state = output_mode in ("per_state", "both")
@@ -1057,7 +1105,7 @@ def process_all_tata(input_path, output_dir, eff_s, eff_e,
     for idx, state in enumerate(targets):
         if progress_callback:
             progress_callback(f"Processing {state}...", idx, len(targets))
-        rows, counter = generate_for_state_tata(entries, state, eff_s, eff_e, counter)
+        rows, counter = generate_for_state_tata(entries, state, eff_s, eff_e, rto_map, counter)
         if not rows:
             continue
         if want_per_state:

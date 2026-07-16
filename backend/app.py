@@ -16,7 +16,7 @@ from datetime import datetime
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from processor import load_input_data, get_all_states, process_all, generate_for_state, write_output_excel
-from processor import get_all_tata_states, process_all_tata
+from processor import get_all_tata_states, process_all_tata, build_tata_rto_map
 
 app = Flask(__name__)
 CORS(app)
@@ -51,14 +51,25 @@ def get_states():
 
     try:
         if lc == "tata":
-            # States come from the fixed RTO-TW Mapper master table, not the
-            # uploaded grid — just confirm the sheet the parser needs exists.
+            # Confirm the uploaded grid has the TW sheet the parser needs.
             from openpyxl import load_workbook as _lw
             wb = _lw(save_path, read_only=True)
             if "TW" not in wb.sheetnames:
                 return jsonify({"error": "Uploaded file has no 'TW' sheet"}), 400
             wb.close()
-            states = get_all_tata_states()
+
+            # States come from the RTO-TW Mapper master table, uploaded fresh
+            # each month rather than bundled with the code.
+            if "rto_master_file" not in request.files:
+                return jsonify({"error": "TATA AIG requires the monthly RTO master file (rto_master_file)"}), 400
+            mf = request.files["rto_master_file"]
+            if not mf.filename.endswith(".xlsx"):
+                return jsonify({"error": "RTO master file must be .xlsx"}), 400
+            master_path = os.path.join(UPLOAD_DIR, f"{session_id}_master_{mf.filename}")
+            mf.save(master_path)
+
+            rto_map = build_tata_rto_map(master_path)
+            states = get_all_tata_states(rto_map)
         else:
             d = load_input_data(save_path)
             states = get_all_states(d)
@@ -109,6 +120,16 @@ def process():
     save_path = os.path.join(UPLOAD_DIR, f"{session_id}_{f.filename}")
     f.save(save_path)
 
+    master_path = None
+    if lc == "tata":
+        if "rto_master_file" not in request.files:
+            return jsonify({"error": "TATA AIG requires the monthly RTO master file (rto_master_file)"}), 400
+        mf = request.files["rto_master_file"]
+        if not mf.filename.endswith(".xlsx"):
+            return jsonify({"error": "RTO master file must be .xlsx"}), 400
+        master_path = os.path.join(UPLOAD_DIR, f"{session_id}_master_{mf.filename}")
+        mf.save(master_path)
+
     out_dir = os.path.join(OUTPUT_DIR, session_id)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -118,15 +139,25 @@ def process():
         progress_log.append({"message": msg, "current": current, "total": total})
 
     try:
-        process_fn = process_all_tata if lc == "tata" else process_all
-        generated = process_fn(
-            save_path, out_dir,
-            effect_start, effect_end,
-            states=states,
-            progress_callback=progress_cb,
-            output_mode=output_mode,
-            combined_filename=combined_filename
-        )
+        if lc == "tata":
+            generated = process_all_tata(
+                save_path, out_dir,
+                effect_start, effect_end,
+                master_path,
+                states=states,
+                progress_callback=progress_cb,
+                output_mode=output_mode,
+                combined_filename=combined_filename
+            )
+        else:
+            generated = process_all(
+                save_path, out_dir,
+                effect_start, effect_end,
+                states=states,
+                progress_callback=progress_cb,
+                output_mode=output_mode,
+                combined_filename=combined_filename
+            )
 
         # Create a zip of all output files
         zip_prefix = "TATA_2W" if lc == "tata" else "Digit_2W"

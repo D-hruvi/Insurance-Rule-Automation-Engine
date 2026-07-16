@@ -112,7 +112,7 @@ function Seal({ status, size = 56 }) {
 
 // ── Sub-components ───────────────────────────────────────────────────────────
 
-function UploadZone({ file, onFile, disabled }) {
+function UploadZone({ file, onFile, disabled, placeholder, hint }) {
   const [dragging, setDragging] = useState(false);
   const inp = useRef();
 
@@ -177,10 +177,10 @@ function UploadZone({ file, onFile, disabled }) {
         ) : (
           <>
             <div style={{ color: "#B8BCC2", fontSize: 13.5 }}>
-              Drop the commission grid workbook
+              {placeholder || "Drop the commission grid workbook"}
             </div>
             <div style={{ color: "#4A4F56", fontSize: 11.5, marginTop: 3, fontFamily: "'IBM Plex Mono', monospace" }}>
-              .XLSX · TW 1+5, 1+1 / SATP, SAOD, RTO, 5+5 GRID SHEETS
+              {hint || ".XLSX · TW 1+5, 1+1 / SATP, SAOD, RTO, 5+5 GRID SHEETS"}
             </div>
           </>
         )}
@@ -430,6 +430,7 @@ const LC_OPTIONS = [
 export default function App() {
   const [lc, setLc] = useState("digit"); // digit | tata
   const [file, setFile] = useState(null);
+  const [rtoMasterFile, setRtoMasterFile] = useState(null); // TATA only, uploaded fresh each month
   const [effStart, setEffStart] = useState(today());
   const [effEnd, setEffEnd] = useState(lastDayOf(today()));
   const [availableStates, setAvailableStates] = useState([]);
@@ -446,35 +447,57 @@ export default function App() {
 
   useEffect(() => { const t = setTimeout(() => setMounted(true), 60); return () => clearTimeout(t); }, []);
 
-  const handleFile = useCallback(async (f) => {
-    setFile(f);
+  const resetDownstream = () => {
     setAvailableStates([]);
     setSelectedStates([]);
-    setStatesLoading(true);
     setResult(null);
     setError(null);
     setStatus("idle");
+  };
 
-    try {
-      const fd = new FormData();
-      fd.append("file", f);
-      fd.append("lc", lc);
-      const res = await fetch(`${API}/api/states`, { method: "POST", body: fd });
-      const data = await res.json();
-      if (data.states) {
-        setAvailableStates(data.states);
+  const handleFile = useCallback((f) => {
+    setFile(f);
+    resetDownstream();
+  }, []);
+
+  const handleMasterFile = useCallback((f) => {
+    setRtoMasterFile(f);
+    resetDownstream();
+  }, []);
+
+  // Fetch state list once we have everything /api/states needs.
+  // DIGIT only needs the grid; TATA also needs the monthly RTO master file.
+  useEffect(() => {
+    if (!file) return;
+    if (lc === "tata" && !rtoMasterFile) return;
+
+    let cancelled = false;
+    setStatesLoading(true);
+
+    (async () => {
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        fd.append("lc", lc);
+        if (lc === "tata") fd.append("rto_master_file", rtoMasterFile);
+        const res = await fetch(`${API}/api/states`, { method: "POST", body: fd });
+        const data = await res.json();
+        if (!cancelled && data.states) setAvailableStates(data.states);
+      } catch (e) {
+        // silently fall back to static list
+      } finally {
+        if (!cancelled) setStatesLoading(false);
       }
-    } catch (e) {
-      // silently fall back to static list
-    } finally {
-      setStatesLoading(false);
-    }
-  }, [lc]);
+    })();
+
+    return () => { cancelled = true; };
+  }, [file, rtoMasterFile, lc]);
 
   const handleLcChange = (nextLc) => {
     if (nextLc === lc || processing) return;
     setLc(nextLc);
     setFile(null);
+    setRtoMasterFile(null);
     setAvailableStates([]);
     setSelectedStates([]);
     setResult(null);
@@ -489,6 +512,7 @@ export default function App() {
 
   const handleSubmit = async () => {
     if (!file) { setError("Please upload an Excel file first."); return; }
+    if (lc === "tata" && !rtoMasterFile) { setError("Please upload this month's RTO master file."); return; }
     if (!effStart || !effEnd) { setError("Set both effect dates."); return; }
 
     setStatus("loading");
@@ -499,6 +523,7 @@ export default function App() {
     const fd = new FormData();
     fd.append("file", file);
     fd.append("lc", lc);
+    if (lc === "tata") fd.append("rto_master_file", rtoMasterFile);
     fd.append("effect_start", effStart);
     fd.append("effect_end", effEnd);
     if (selectedStates.length > 0)
@@ -527,7 +552,7 @@ export default function App() {
     }
   };
 
-  const canSubmit = !!file && !!effStart && !!effEnd && status !== "loading";
+  const canSubmit = !!file && (lc !== "tata" || !!rtoMasterFile) && !!effStart && !!effEnd && status !== "loading";
   const processing = status === "loading";
   const stateCount = (availableStates.length > 0 ? availableStates : STATES_INDIA).length;
 
@@ -659,6 +684,17 @@ export default function App() {
 
           <Step n="01" label="Source file" delay="0.05s">
             <UploadZone file={file} onFile={handleFile} disabled={processing} />
+            {lc === "tata" && (
+              <div style={{ marginTop: 12 }}>
+                <UploadZone
+                  file={rtoMasterFile}
+                  onFile={handleMasterFile}
+                  disabled={processing}
+                  placeholder="Drop this month's RTO master file"
+                  hint=".XLSX · TATA_RTO_Master · RTO-TW MAPPER SHEET · RE-UPLOAD MONTHLY"
+                />
+              </div>
+            )}
             {statesLoading && (
               <div style={{
                 color: "#6B7178", fontSize: 11, marginTop: 10,
