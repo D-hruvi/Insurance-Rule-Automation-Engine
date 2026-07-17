@@ -626,7 +626,7 @@ export default function App() {
               <div style={{
                 fontSize: 13, color: "#6B7178", marginTop: 9, maxWidth: 420, lineHeight: 1.5,
               }}>
-                Upload a broker commission grid. Receive certified, state-wise payout rule files, one per jurisdiction.
+                One grid in, every state's rules out.
               </div>
             </div>
           </div>
