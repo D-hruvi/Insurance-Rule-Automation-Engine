@@ -132,6 +132,34 @@ AVENGER_MODEL = (
 )
 
 
+def _cluster_matches_filter(cluster_state_field, state_filter):
+    """
+    Decide whether a cluster (whose combined state field may list several
+    states, e.g. "ANDHRA PRADESH, TELANGANA") should be included given
+    state_filter.
+
+    state_filter may be:
+      - None                      -> include every cluster
+      - a single state string     -> include if that state is one of the
+                                      cluster's states (per-state generation)
+      - a set/list/tuple of states -> include if ANY of those states is one
+                                      of the cluster's states (combined
+                                      generation). This must be called ONCE
+                                      per cluster in that case, not once per
+                                      target state, otherwise a cluster that
+                                      spans multiple selected states gets
+                                      emitted once per matching state and
+                                      produces duplicate rows in the
+                                      combined output.
+    """
+    if not state_filter:
+        return True
+    cluster_states = set(cluster_state_field.split(", "))
+    if isinstance(state_filter, (set, frozenset, list, tuple)):
+        return bool(cluster_states & set(state_filter))
+    return state_filter in cluster_states
+
+
 def normalize_make_1p5(make_raw):
     """
     Transform TW 1+5 Make cell → correct output string.
@@ -601,7 +629,7 @@ def gen_1p5(d, eff_s, eff_e, counter, state_filter=None):
         if not rtos:
             continue
         state = _state_from_rtos(rtos)
-        if state_filter and state_filter not in state.split(", "):
+        if not _cluster_matches_filter(state, state_filter):
             continue
         rto_f = _rto_field(rtos)
         pfx = _abbr(cluster)
@@ -710,7 +738,7 @@ def gen_1p1(d, eff_s, eff_e, counter, state_filter=None):
         if not rtos:
             continue
         state = _state_from_rtos(rtos)
-        if state_filter and state_filter not in state.split(", "):
+        if not _cluster_matches_filter(state, state_filter):
             continue
         rto_f = _rto_field(rtos)
         pfx = _abbr(cluster)
@@ -791,7 +819,7 @@ def gen_saod(d, eff_s, eff_e, counter, state_filter=None):
         if not rtos:
             continue
         state = _state_from_rtos(rtos)
-        if state_filter and state_filter not in state.split(", "):
+        if not _cluster_matches_filter(state, state_filter):
             continue
         rto_f = _rto_field(rtos)
         pfx = _abbr(cluster)
@@ -842,6 +870,26 @@ def generate_for_state(d, state_name, eff_s, eff_e, counter_start=1):
     rows.extend(r)
     return rows, counter
 
+def generate_master_rows(d, eff_s, eff_e, target_states=None, counter_start=1):
+    """
+    Generate every rule row exactly once for the given set of target states
+    (or every state if target_states is None/empty).
+
+    A cluster may span several states (e.g. "ANDHRA PRADESH, TELANGANA").
+    Calling this once with the FULL set of target states (rather than once
+    per individual state) ensures each cluster's rows are produced a single
+    time no matter how many of its states were selected — this is what
+    prevents duplicate rows from appearing in combined, multi-state output.
+    """
+    rows, counter = [], counter_start
+    r, counter = gen_1p5(d, eff_s, eff_e, counter, state_filter=target_states)
+    rows.extend(r)
+    r, counter = gen_saod(d, eff_s, eff_e, counter, state_filter=target_states)
+    rows.extend(r)
+    r, counter = gen_1p1(d, eff_s, eff_e, counter, state_filter=target_states)
+    rows.extend(r)
+    return rows, counter
+
 def process_all(input_path, output_dir, eff_s, eff_e,
                 states=None, progress_callback=None,
                 output_mode="per_state", combined_filename=None):
@@ -854,6 +902,14 @@ def process_all(input_path, output_dir, eff_s, eff_e,
     Rule Code numbering runs continuously across the whole run (not reset
     per state), so codes stay unique whether they land in per-state files
     or the combined file.
+
+    Rows are generated ONCE per cluster (via generate_master_rows) rather
+    than once per target state. Previously, a cluster spanning several
+    states (e.g. "ANDHRA PRADESH, TELANGANA") was regenerated for every
+    matching state in the targets loop, so the same rule ended up in the
+    combined workbook multiple times with only its counter/rule name
+    differing. Per-state files are now produced by filtering this single
+    master row set down to the rows relevant to each state.
     """
     os.makedirs(output_dir, exist_ok=True)
     if progress_callback:
@@ -866,28 +922,34 @@ def process_all(input_path, output_dir, eff_s, eff_e,
     want_combined = output_mode in ("combined", "both")
 
     generated = []
-    combined_rows = []
-    counter = 1
-    for idx, state in enumerate(targets):
-        if progress_callback:
-            progress_callback(f"Processing {state}...", idx, len(targets))
-        rows, counter = generate_for_state(d, state, eff_s, eff_e, counter)
-        if not rows:
-            continue
-        if want_per_state:
+
+    if progress_callback:
+        progress_callback("Generating rules...", 0, 1)
+    target_filter = None if states is None else set(targets)
+    master_rows, _ = generate_master_rows(d, eff_s, eff_e,
+                                           target_states=target_filter,
+                                           counter_start=1)
+
+    state_col = OUTPUT_HEADERS.index("State")
+
+    if want_per_state:
+        for idx, state in enumerate(targets):
+            if progress_callback:
+                progress_callback(f"Writing {state}...", idx, len(targets))
+            rows = [r for r in master_rows if state in str(r[state_col]).split(", ")]
+            if not rows:
+                continue
             fname = state.replace(", ", "_").replace(" ", "").replace(",", "_") + "_2W.xlsx"
             out = os.path.join(output_dir, fname)
             write_output_excel(rows, out)
             generated.append(out)
-        if want_combined:
-            combined_rows.extend(rows)
 
-    if want_combined and combined_rows:
+    if want_combined and master_rows:
         fname = combined_filename or "Combined_States_2W.xlsx"
         if not fname.lower().endswith(".xlsx"):
             fname += ".xlsx"
         out = os.path.join(output_dir, fname)
-        write_output_excel(combined_rows, out)
+        write_output_excel(master_rows, out)
         generated.append(out)
 
     if progress_callback:
@@ -1046,8 +1108,35 @@ def build_row_tata(rule_name, cover_type, biz_type, state, rto,
     ]
 
 def generate_for_state_tata(entries, state_name, eff_s, eff_e, rto_map, counter_start=1):
+    rows, counter = generate_master_rows_tata(entries, eff_s, eff_e, rto_map,
+                                               target_states=state_name,
+                                               counter_start=counter_start)
+    return rows, counter
+
+def generate_master_rows_tata(entries, eff_s, eff_e, rto_map,
+                               target_states=None, counter_start=1):
+    """
+    Generate every TATA rule row exactly once for the given set of target
+    states (or every state if target_states is None).
+
+    A cluster may span several states. Calling this once with the FULL set
+    of target states (rather than once per individual state) ensures each
+    cluster's rows are produced a single time no matter how many of its
+    states were selected — this is what prevents duplicate rows from
+    appearing in combined, multi-state output.
+
+    target_states may be a single state string (legacy per-state behavior)
+    or a set/list/tuple of states (combined generation).
+    """
     rows = []
     counter = counter_start
+
+    if isinstance(target_states, (set, frozenset, list, tuple)):
+        target_set = set(target_states)
+    elif target_states:
+        target_set = {target_states}
+    else:
+        target_set = None
 
     # Group entries by cluster so each cluster's RTO/state resolution
     # (and rule-name prefix) is only computed once.
@@ -1059,7 +1148,7 @@ def generate_for_state_tata(entries, state_name, eff_s, eff_e, rto_map, counter_
         cluster_info = rto_map.get(cluster_key)
         if not cluster_info or not cluster_info["rtos"]:
             continue  # e.g. "Andaman" — in the TW sheet but not in the RTO mapper
-        if state_name not in cluster_info["states"]:
+        if target_set is not None and not (target_set & set(cluster_info["states"])):
             continue
 
         state_field = ", ".join(cluster_info["states"])
@@ -1086,6 +1175,15 @@ def generate_for_state_tata(entries, state_name, eff_s, eff_e, rto_map, counter_
 def process_all_tata(input_path, output_dir, eff_s, eff_e, rto_master_path,
                       states=None, progress_callback=None,
                       output_mode="per_state", combined_filename=None):
+    """
+    Rows are generated ONCE per cluster (via generate_master_rows_tata)
+    rather than once per target state. Previously, a cluster spanning
+    several states was regenerated for every matching state in the targets
+    loop, so the same rule ended up in the combined workbook multiple
+    times with only its counter/rule name differing. Per-state files are
+    now produced by filtering this single master row set down to the rows
+    relevant to each state.
+    """
     os.makedirs(output_dir, exist_ok=True)
     if progress_callback:
         progress_callback("Loading TATA TW source data...", 0, 1)
@@ -1100,28 +1198,34 @@ def process_all_tata(input_path, output_dir, eff_s, eff_e, rto_master_path,
     want_combined = output_mode in ("combined", "both")
 
     generated = []
-    combined_rows = []
-    counter = 1
-    for idx, state in enumerate(targets):
-        if progress_callback:
-            progress_callback(f"Processing {state}...", idx, len(targets))
-        rows, counter = generate_for_state_tata(entries, state, eff_s, eff_e, rto_map, counter)
-        if not rows:
-            continue
-        if want_per_state:
+
+    if progress_callback:
+        progress_callback("Generating rules...", 0, 1)
+    target_filter = None if states is None else set(targets)
+    master_rows, _ = generate_master_rows_tata(entries, eff_s, eff_e, rto_map,
+                                                target_states=target_filter,
+                                                counter_start=1)
+
+    state_col = TATA_OUTPUT_HEADERS.index("State")
+
+    if want_per_state:
+        for idx, state in enumerate(targets):
+            if progress_callback:
+                progress_callback(f"Writing {state}...", idx, len(targets))
+            rows = [r for r in master_rows if state in str(r[state_col]).split(", ")]
+            if not rows:
+                continue
             fname = state.replace(", ", "_").replace(" ", "").replace(",", "_").replace("&", "and") + "_TATA_2W.xlsx"
             out = os.path.join(output_dir, fname)
             write_output_excel(rows, out, headers=TATA_OUTPUT_HEADERS)
             generated.append(out)
-        if want_combined:
-            combined_rows.extend(rows)
 
-    if want_combined and combined_rows:
+    if want_combined and master_rows:
         fname = combined_filename or "Combined_States_TATA_2W.xlsx"
         if not fname.lower().endswith(".xlsx"):
             fname += ".xlsx"
         out = os.path.join(output_dir, fname)
-        write_output_excel(combined_rows, out, headers=TATA_OUTPUT_HEADERS)
+        write_output_excel(master_rows, out, headers=TATA_OUTPUT_HEADERS)
         generated.append(out)
 
     if progress_callback:
