@@ -510,6 +510,53 @@ export default function App() {
     setEffEnd(lastDayOf(v));
   };
 
+  const pollRef = useRef(null);
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+
+  // Stop any in-flight polling if the component unmounts mid-job.
+  useEffect(() => () => stopPolling(), []);
+
+  const pollJob = (jobId) => {
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`${API}/api/job/${jobId}`);
+        if (!res.ok) {
+          // Job expired or the backend restarted mid-run (e.g. Render
+          // redeploy) — surface that instead of polling forever.
+          stopPolling();
+          const data = await res.json().catch(() => ({}));
+          setError(data.error || `Lost track of the job (HTTP ${res.status}).`);
+          setStatus("error");
+          return;
+        }
+        const data = await res.json();
+
+        if (data.status === "running") {
+          setProgress(data.progress || []);
+        } else if (data.status === "done") {
+          stopPolling();
+          setProgress(data.progress || []);
+          setResult(data);
+          setStatus("success");
+        } else if (data.status === "error") {
+          stopPolling();
+          setProgress(data.progress || []);
+          setError(data.error || "Server error");
+          setStatus("error");
+        }
+      } catch (e) {
+        // Transient network hiccup — keep polling rather than failing
+        // the whole run on one dropped request.
+      }
+    }, 1500);
+  };
+
   const handleSubmit = async () => {
     if (!file) { setError("Please upload an Excel file first."); return; }
     if (lc === "tata" && !rtoMasterFile) { setError("Please upload this month's RTO master file."); return; }
@@ -519,6 +566,7 @@ export default function App() {
     setProgress([]);
     setResult(null);
     setError(null);
+    stopPolling();
 
     const fd = new FormData();
     fd.append("file", file);
@@ -530,23 +578,17 @@ export default function App() {
       fd.append("states", JSON.stringify(selectedStates));
     fd.append("output_mode", outputMode);
 
-    let tick = 0;
-    const ticker = setInterval(() => {
-      tick++;
-      setProgress(p => [...p, { message: `Processing… (${tick}s)`, current: tick, total: 0 }]);
-    }, 1200);
-
     try {
+      // This now returns almost immediately with a job_id — the actual
+      // Excel generation happens in a background thread on the server,
+      // so this request can't get killed by Render's ~100s HTTP timeout
+      // even when processing all states takes several minutes.
       const res = await fetch(`${API}/api/process`, { method: "POST", body: fd });
-      clearInterval(ticker);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Server error");
-      setProgress(data.progress || []);
       setSessionId(data.session_id);
-      setResult(data);
-      setStatus("success");
+      pollJob(data.job_id);
     } catch (e) {
-      clearInterval(ticker);
       setError(e.message);
       setStatus("error");
     }

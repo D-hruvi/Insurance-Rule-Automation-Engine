@@ -1,17 +1,28 @@
 """
 Digit 2W Converter - Flask API
 Endpoints:
-  POST /api/process   - Upload Excel + params → generate output files
-  GET  /api/states    - List available states from an uploaded file
+  POST /api/process     - Upload Excel + params -> kicks off a background job, returns job_id
+  GET  /api/job/<job_id> - Poll job status/progress; once done, returns the same
+                            payload /api/process used to return synchronously
+  GET  /api/states      - List available states from an uploaded file
   GET  /api/download/<filename> - Download a generated file
-  GET  /api/files     - List all generated files in current session
+  GET  /api/files       - List all generated files in current session
+
+Processing now runs in a background thread instead of inside the request
+handler. Render's proxy enforces a hard ~100s timeout on any single HTTP
+request, and a synchronous /api/process call for "all states" easily blows
+past that (plus cold-start time on a sleeping free-tier instance). The
+frontend was also just showing a fake local timer as "progress" while it
+waited, capped at 0% forever, since it had no way to see real progress from
+a request that hadn't returned yet. This version returns a job_id almost
+immediately and the frontend polls /api/job/<job_id> for real progress.
 """
 
 import os
 import json
-import tempfile
-import zipfile
+import threading
 import uuid
+import time
 from datetime import datetime
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
@@ -25,6 +36,35 @@ UPLOAD_DIR = "/tmp/digit_uploads"
 OUTPUT_DIR = "/tmp/digit_outputs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ──────────────────────────────────────────────────────────────
+# In-memory job store. Fine for a single-instance deployment; if this
+# ever runs on more than one worker/dyno, swap this for something shared
+# (redis, a DB row, etc) since each process would have its own JOBS dict.
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+
+JOB_TTL_SECONDS = 60 * 60  # prune finished jobs after an hour
+
+
+def _set_job(job_id, **fields):
+    with JOBS_LOCK:
+        JOBS[job_id].update(fields)
+
+
+def _get_job(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        return dict(job) if job else None
+
+
+def _prune_old_jobs():
+    cutoff = time.time() - JOB_TTL_SECONDS
+    with JOBS_LOCK:
+        stale = [jid for jid, j in JOBS.items() if j.get("created_at", 0) < cutoff]
+        for jid in stale:
+            JOBS.pop(jid, None)
+
 
 # ──────────────────────────────────────────────────────────────
 @app.route("/api/health", methods=["GET"])
@@ -84,10 +124,86 @@ def get_states():
 
 
 # ──────────────────────────────────────────────────────────────
+def _run_process_job(job_id, lc, save_path, master_path, effect_start, effect_end,
+                      states, output_mode, combined_filename, session_id):
+    """Runs in a background thread. Mirrors what /api/process used to do
+    inline, but writes progress/results into the JOBS dict instead of
+    returning them straight to a waiting HTTP response."""
+
+    def progress_cb(msg, current, total):
+        job = _get_job(job_id)
+        log = (job or {}).get("progress", [])
+        log = log + [{"message": msg, "current": current, "total": total}]
+        _set_job(job_id, progress=log)
+
+    out_dir = os.path.join(OUTPUT_DIR, session_id)
+    os.makedirs(out_dir, exist_ok=True)
+
+    try:
+        if lc == "tata":
+            generated = process_all_tata(
+                save_path, out_dir,
+                effect_start, effect_end,
+                master_path,
+                states=states,
+                progress_callback=progress_cb,
+                output_mode=output_mode,
+                combined_filename=combined_filename
+            )
+        else:
+            generated = process_all(
+                save_path, out_dir,
+                effect_start, effect_end,
+                states=states,
+                progress_callback=progress_cb,
+                output_mode=output_mode,
+                combined_filename=combined_filename
+            )
+
+        import zipfile
+        zip_prefix = "TATA_2W" if lc == "tata" else "Digit_2W"
+        zip_path = os.path.join(out_dir, f"{zip_prefix}_{session_id}.zip")
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fp in generated:
+                zf.write(fp, os.path.basename(fp))
+
+        file_info = []
+        for fp in generated:
+            fname = os.path.basename(fp)
+            size = os.path.getsize(fp)
+            file_info.append({
+                "filename": fname,
+                "size_bytes": size,
+                "download_url": f"/api/download/{session_id}/{fname}"
+            })
+
+        zip_info = {
+            "filename": os.path.basename(zip_path),
+            "size_bytes": os.path.getsize(zip_path),
+            "download_url": f"/api/download/{session_id}/{os.path.basename(zip_path)}"
+        }
+
+        job = _get_job(job_id) or {}
+        result = {
+            "session_id": session_id,
+            "files_generated": len(generated),
+            "files": file_info,
+            "zip": zip_info,
+            "progress": job.get("progress", [])
+        }
+        _set_job(job_id, status="done", result=result)
+
+    except Exception as e:
+        import traceback
+        _set_job(job_id, status="error", error=str(e), trace=traceback.format_exc())
+
+
 @app.route("/api/process", methods=["POST"])
 def process():
     """
-    Process Excel and generate output files.
+    Kicks off Excel generation in a background thread and returns a job_id
+    immediately. Poll GET /api/job/<job_id> for progress and the final result.
+
     Form fields:
       file             - The input .xlsx file
       effect_start     - e.g. "2026-02-01"
@@ -96,6 +212,8 @@ def process():
       output_mode      - "per_state" (default), "combined", or "both"
       combined_filename- optional custom filename for the combined workbook
     """
+    _prune_old_jobs()
+
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
@@ -130,69 +248,46 @@ def process():
         master_path = os.path.join(UPLOAD_DIR, f"{session_id}_master_{mf.filename}")
         mf.save(master_path)
 
-    out_dir = os.path.join(OUTPUT_DIR, session_id)
-    os.makedirs(out_dir, exist_ok=True)
-
-    progress_log = []
-
-    def progress_cb(msg, current, total):
-        progress_log.append({"message": msg, "current": current, "total": total})
-
-    try:
-        if lc == "tata":
-            generated = process_all_tata(
-                save_path, out_dir,
-                effect_start, effect_end,
-                master_path,
-                states=states,
-                progress_callback=progress_cb,
-                output_mode=output_mode,
-                combined_filename=combined_filename
-            )
-        else:
-            generated = process_all(
-                save_path, out_dir,
-                effect_start, effect_end,
-                states=states,
-                progress_callback=progress_cb,
-                output_mode=output_mode,
-                combined_filename=combined_filename
-            )
-
-        # Create a zip of all output files
-        zip_prefix = "TATA_2W" if lc == "tata" else "Digit_2W"
-        zip_path = os.path.join(out_dir, f"{zip_prefix}_{session_id}.zip")
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for fp in generated:
-                zf.write(fp, os.path.basename(fp))
-
-        file_info = []
-        for fp in generated:
-            fname = os.path.basename(fp)
-            size = os.path.getsize(fp)
-            file_info.append({
-                "filename": fname,
-                "size_bytes": size,
-                "download_url": f"/api/download/{session_id}/{fname}"
-            })
-
-        zip_info = {
-            "filename": os.path.basename(zip_path),
-            "size_bytes": os.path.getsize(zip_path),
-            "download_url": f"/api/download/{session_id}/{os.path.basename(zip_path)}"
+    job_id = str(uuid.uuid4())[:12]
+    with JOBS_LOCK:
+        JOBS[job_id] = {
+            "status": "running",
+            "progress": [],
+            "result": None,
+            "error": None,
+            "created_at": time.time(),
         }
 
-        return jsonify({
-            "session_id": session_id,
-            "files_generated": len(generated),
-            "files": file_info,
-            "zip": zip_info,
-            "progress": progress_log
-        })
+    thread = threading.Thread(
+        target=_run_process_job,
+        args=(job_id, lc, save_path, master_path, effect_start, effect_end,
+              states, output_mode, combined_filename, session_id),
+        daemon=True,
+    )
+    thread.start()
 
-    except Exception as e:
-        import traceback
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+    return jsonify({"job_id": job_id, "session_id": session_id})
+
+
+# ──────────────────────────────────────────────────────────────
+@app.route("/api/job/<job_id>", methods=["GET"])
+def job_status(job_id):
+    job = _get_job(job_id)
+    if job is None:
+        return jsonify({"error": "Job not found (it may have expired)"}), 404
+
+    if job["status"] == "error":
+        return jsonify({
+            "status": "error",
+            "error": job.get("error", "Unknown error"),
+            "trace": job.get("trace"),
+            "progress": job.get("progress", []),
+        }), 200
+
+    if job["status"] == "done":
+        return jsonify({"status": "done", **job["result"]})
+
+    return jsonify({"status": "running", "progress": job.get("progress", [])})
 
 
 # ──────────────────────────────────────────────────────────────
