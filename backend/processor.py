@@ -352,12 +352,79 @@ def load_input_data(path):
     wb = load_workbook(path, read_only=True, data_only=True)
     d = {}
 
-    ws_rto = wb["2W RTO's"]
-    rto_rows = list(ws_rto.iter_rows(values_only=True))
-    d["rto"] = {}
-    for r in rto_rows[2:]:
-        if r[1]:
-            d["rto"][r[1]] = {"1p1": r[2], "1p5": r[3], "saod": r[4]}
+    if "2W RTO's" in wb.sheetnames:
+        # ── Original format ──────────────────────────────────────
+        ws_rto = wb["2W RTO's"]
+        rto_rows = list(ws_rto.iter_rows(values_only=True))
+        d["rto"] = {}
+        for r in rto_rows[2:]:
+            if r[1]:
+                d["rto"][r[1]] = {"1p1": r[2], "1p5": r[3], "saod": r[4]}
+
+        ws = wb["TW 1+5"]
+        d["tw_1p5"] = [
+            {"cluster": str(r[1]).strip().upper(), "make": r[2], "seg": r[3], "cd2": r[5]}
+            for r in ws.iter_rows(values_only=True) if r[1] and r[2] and r[3]
+        ]
+
+        ws = wb["TW 1+1 & SATP"]
+        d["tw_1p1"] = [
+            {"cluster": str(r[1]).strip().upper(), "seg": r[2], "cd2_1p1": r[4], "cd2_satp": r[5]}
+            for r in ws.iter_rows(values_only=True) if r[1] and r[2] and r[3] is not None
+        ]
+
+        ws = wb["TW SAOD with Flexi Options"]
+        d["tw_saod"] = [
+            {"cluster": r[1], "seg": r[2],
+             "yr1": r[7], "yr2": r[8], "yr3": r[9], "yr4": r[10]}
+            for r in ws.iter_rows(values_only=True) if r[1] and r[2] and r[6] is not None
+        ]
+
+    elif "RTO Mapping" in wb.sheetnames:
+        # ── "New Format" grid (e.g. Jul'26 broker grid) ──────────────
+        # Same underlying data as the original format, but several sheets
+        # were renamed and two of them got their columns rearranged:
+        #   - RTO code moved from column 1 to column 0; the three
+        #     cluster columns moved from 2/3/4 to 10/11/12; and this sheet
+        #     has only one header row instead of two.
+        #   - "2W Grid 1+1 & SATP" now carries both a Max CD2 and an Avg
+        #     CD2 for each of the 1+1 and SATP sections (the old sheet had
+        #     one CD2 value per section). Per instruction, Max CD2 is used
+        #     for both sections here.
+        #   - "2W_SAOD" gained a leading 'Min CD1' column, shifting every
+        #     year's CD2 value one column to the left of the old position.
+        ws_rto = wb["RTO Mapping"]
+        rto_rows = list(ws_rto.iter_rows(values_only=True))
+        d["rto"] = {}
+        for r in rto_rows[1:]:
+            if r[0]:
+                d["rto"][r[0]] = {"1p1": r[10], "1p5": r[11], "saod": r[12]}
+
+        ws = wb["2W Grid 1+5"]
+        d["tw_1p5"] = [
+            {"cluster": str(r[1]).strip().upper(), "make": r[2], "seg": r[3], "cd2": r[5]}
+            for r in ws.iter_rows(values_only=True) if r[1] and r[2] and r[3]
+        ]
+
+        ws = wb["2W Grid 1+1 & SATP"]
+        d["tw_1p1"] = [
+            {"cluster": str(r[1]).strip().upper(), "seg": r[2], "cd2_1p1": r[4], "cd2_satp": r[6]}
+            for r in ws.iter_rows(values_only=True) if r[1] and r[2] and r[3] is not None
+        ]
+
+        ws = wb["2W_SAOD"]
+        d["tw_saod"] = [
+            {"cluster": r[1], "seg": r[2],
+             "yr1": r[6], "yr2": r[7], "yr3": r[8], "yr4": r[9]}
+            for r in ws.iter_rows(values_only=True) if r[1] and r[2] and r[6] is not None
+        ]
+
+    else:
+        wb.close()
+        raise ValueError(
+            "Unrecognized workbook: found neither the original \"2W RTO's\" "
+            "sheet nor the \"RTO Mapping\" sheet (New Format grid)."
+        )
 
     # Build cluster->rto lookups. Source sheets are inconsistent about
     # cluster-name casing (e.g. 'NE_OR_GOOD' for some brand rows vs
@@ -374,25 +441,6 @@ def load_input_data(path):
             if cl:
                 cl_key = cl.strip().upper()
                 d[key].setdefault(cl_key, []).append(rto)
-
-    ws = wb["TW 1+5"]
-    d["tw_1p5"] = [
-        {"cluster": str(r[1]).strip().upper(), "make": r[2], "seg": r[3], "cd2": r[5]}
-        for r in ws.iter_rows(values_only=True) if r[1] and r[2] and r[3]
-    ]
-
-    ws = wb["TW 1+1 & SATP"]
-    d["tw_1p1"] = [
-        {"cluster": str(r[1]).strip().upper(), "seg": r[2], "cd2_1p1": r[4], "cd2_satp": r[5]}
-        for r in ws.iter_rows(values_only=True) if r[1] and r[2] and r[3] is not None
-    ]
-
-    ws = wb["TW SAOD with Flexi Options"]
-    d["tw_saod"] = [
-        {"cluster": r[1], "seg": r[2],
-         "yr1": r[7], "yr2": r[8], "yr3": r[9], "yr4": r[10]}
-        for r in ws.iter_rows(values_only=True) if r[1] and r[2] and r[6] is not None
-    ]
 
     wb.close()
     return d
