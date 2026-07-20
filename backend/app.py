@@ -67,6 +67,51 @@ def _prune_old_jobs():
 
 
 # ──────────────────────────────────────────────────────────────
+def _resolve_tata_master(save_path, session_id, files):
+    """
+    Figure out where the RTO-TW Mapper data should come from for a TATA
+    request, and validate the uploaded workbook(s) along the way.
+
+    Two supported cases:
+      1. Separate files (original behavior): the main grid has a 'TW'
+         sheet, and a distinct rto_master_file has an 'RTO-TW Mapper' sheet.
+      2. Merged single file: the same upload has BOTH the 'TW' sheet and
+         the 'RTO-TW Mapper' sheet, so no rto_master_file is required.
+
+    Returns (master_path, None) on success, or (None, error_response) where
+    error_response is a (jsonify(...), status_code) tuple ready to return
+    directly from the calling route.
+    """
+    from openpyxl import load_workbook as _lw
+    wb = _lw(save_path, read_only=True)
+    sheet_names = wb.sheetnames
+    wb.close()
+
+    if "TW" not in sheet_names:
+        return None, (jsonify({"error": "Uploaded file has no 'TW' sheet"}), 400)
+
+    mf = files.get("rto_master_file")
+    if mf and mf.filename:
+        if not mf.filename.endswith(".xlsx"):
+            return None, (jsonify({"error": "RTO master file must be .xlsx"}), 400)
+        master_path = os.path.join(UPLOAD_DIR, f"{session_id}_master_{mf.filename}")
+        mf.save(master_path)
+        return master_path, None
+
+    # No separate master file uploaded — fall back to the merged-file case.
+    if "RTO-TW Mapper" not in sheet_names:
+        return None, (jsonify({
+            "error": (
+                "No RTO master file uploaded, and the source file has no "
+                "'RTO-TW Mapper' sheet. Either upload this month's RTO "
+                "master file separately, or upload a single workbook that "
+                "contains both the 'TW' sheet and the 'RTO-TW Mapper' sheet."
+            )
+        }), 400)
+    return save_path, None
+
+
+# ──────────────────────────────────────────────────────────────
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "timestamp": datetime.now().isoformat()})
@@ -91,22 +136,13 @@ def get_states():
 
     try:
         if lc == "tata":
-            # Confirm the uploaded grid has the TW sheet the parser needs.
-            from openpyxl import load_workbook as _lw
-            wb = _lw(save_path, read_only=True)
-            if "TW" not in wb.sheetnames:
-                return jsonify({"error": "Uploaded file has no 'TW' sheet"}), 400
-            wb.close()
-
-            # States come from the RTO-TW Mapper master table, uploaded fresh
-            # each month rather than bundled with the code.
-            if "rto_master_file" not in request.files:
-                return jsonify({"error": "TATA AIG requires the monthly RTO master file (rto_master_file)"}), 400
-            mf = request.files["rto_master_file"]
-            if not mf.filename.endswith(".xlsx"):
-                return jsonify({"error": "RTO master file must be .xlsx"}), 400
-            master_path = os.path.join(UPLOAD_DIR, f"{session_id}_master_{mf.filename}")
-            mf.save(master_path)
+            # Confirm the uploaded grid has the TW sheet the parser needs, and
+            # resolve the RTO master: either a separate rto_master_file, or —
+            # if that wasn't sent — the same workbook if it also carries the
+            # RTO-TW Mapper sheet (a merged single-file upload).
+            master_path, err = _resolve_tata_master(save_path, session_id, request.files)
+            if err:
+                return err
 
             rto_map = build_tata_rto_map(master_path)
             states = get_all_tata_states(rto_map)
@@ -240,13 +276,9 @@ def process():
 
     master_path = None
     if lc == "tata":
-        if "rto_master_file" not in request.files:
-            return jsonify({"error": "TATA AIG requires the monthly RTO master file (rto_master_file)"}), 400
-        mf = request.files["rto_master_file"]
-        if not mf.filename.endswith(".xlsx"):
-            return jsonify({"error": "RTO master file must be .xlsx"}), 400
-        master_path = os.path.join(UPLOAD_DIR, f"{session_id}_master_{mf.filename}")
-        mf.save(master_path)
+        master_path, err = _resolve_tata_master(save_path, session_id, request.files)
+        if err:
+            return err
 
     job_id = str(uuid.uuid4())[:12]
     with JOBS_LOCK:

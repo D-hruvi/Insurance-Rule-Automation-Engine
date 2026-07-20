@@ -454,10 +454,13 @@ export default function App() {
   }, []);
 
   // Fetch state list once we have everything /api/states needs.
-  // DIGIT only needs the grid; TATA also needs the monthly RTO master file.
+  // DIGIT only needs the grid. TATA needs the grid plus RTO-TW Mapper data,
+  // which can come either from a separate rto_master_file or, if the main
+  // file already contains the 'RTO-TW Mapper' sheet, from that same file —
+  // so we don't gate this on rtoMasterFile being set for TATA anymore; the
+  // backend resolves which case it is.
   useEffect(() => {
     if (!file) return;
-    if (lc === "tata" && !rtoMasterFile) return;
 
     let cancelled = false;
     setStatesLoading(true);
@@ -467,7 +470,7 @@ export default function App() {
         const fd = new FormData();
         fd.append("file", file);
         fd.append("lc", lc);
-        if (lc === "tata") fd.append("rto_master_file", rtoMasterFile);
+        if (lc === "tata" && rtoMasterFile) fd.append("rto_master_file", rtoMasterFile);
         const res = await fetch(`${API}/api/states`, { method: "POST", body: fd });
         const data = await res.json();
         if (!cancelled && data.states) setAvailableStates(data.states);
@@ -547,7 +550,6 @@ export default function App() {
 
   const handleSubmit = async () => {
     if (!file) { setError("Please upload an Excel file first."); return; }
-    if (lc === "tata" && !rtoMasterFile) { setError("Please upload this month's RTO master file."); return; }
     if (!effStart || !effEnd) { setError("Set both effect dates."); return; }
 
     setStatus("loading");
@@ -559,7 +561,7 @@ export default function App() {
     const fd = new FormData();
     fd.append("file", file);
     fd.append("lc", lc);
-    if (lc === "tata") fd.append("rto_master_file", rtoMasterFile);
+    if (lc === "tata" && rtoMasterFile) fd.append("rto_master_file", rtoMasterFile);
     fd.append("effect_start", effStart);
     fd.append("effect_end", effEnd);
     if (selectedStates.length > 0)
@@ -582,7 +584,7 @@ export default function App() {
     }
   };
 
-  const canSubmit = !!file && (lc !== "tata" || !!rtoMasterFile) && !!effStart && !!effEnd && status !== "loading";
+  const canSubmit = !!file && !!effStart && !!effEnd && status !== "loading";
   const processing = status === "loading";
   const stateCount = (availableStates.length > 0 ? availableStates : STATES_INDIA).length;
 
@@ -720,9 +722,15 @@ export default function App() {
                   file={rtoMasterFile}
                   onFile={handleMasterFile}
                   disabled={processing}
-                  placeholder="Drop this month's RTO master file"
-                  hint=".XLSX · TATA_RTO_Master · RTO-TW MAPPER SHEET · RE-UPLOAD MONTHLY"
+                  placeholder="Drop this month's RTO master file (optional)"
+                  hint=".XLSX · TATA_RTO_Master · RTO-TW MAPPER SHEET · SKIP IF ALREADY MERGED INTO THE SOURCE FILE ABOVE"
                 />
+                <div style={{
+                  color: "#454A51", fontSize: 11, marginTop: 8, lineHeight: 1.5,
+                  fontFamily: "'IBM Plex Mono', monospace",
+                }}>
+                  Only needed if the source file above doesn't already have an 'RTO-TW Mapper' sheet.
+                </div>
               </div>
             )}
             {statesLoading && (
