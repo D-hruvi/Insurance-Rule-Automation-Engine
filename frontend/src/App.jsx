@@ -1,20 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
-const API = "https://ai-for-payout-grid.onrender.com";
+const API = "https://insurance-rule-automation-engine-web.onrender.com";
 
-// ── Design system ────────────────────────────────────────────────────────────
-// Subject: an operator's console for turning multi-sheet commission grids into
-// certified, per-state insurance rule files. The page is built like the cover
-// sheet of a regulatory filing — a sealed instrument, not a SaaS dashboard.
-//
-// Color    base #1A1D22 · surface #262A31 · recessed #22262D · hairline #363C46
-//          ink #ECE8E0 · brass #C9A227 / #E0BB4A (hot) · ledger-green #4A8772
-//          oxide #A14B4B
-// Type     Fraunces (display serif, used once, large) · IBM Plex Sans (UI)
-//          IBM Plex Mono (every number, filename, code — tabular-nums)
-// Motif    a full wax-seal mark that draws itself in on load (stroke reveal),
-//          then becomes the live status indicator — the literal certification
-//          mark this tool stamps onto its output
+
 
 const STATES_INDIA = [
   "ANDAMAN ISLANDS","ANDHRA PRADESH","ARUNACHAL PRADESH","ASSAM","BIHAR",
